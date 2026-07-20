@@ -20,7 +20,7 @@ Copy into your app module:
 - `build-android/plugins/libunirt_plugin_llama_cpp.so` → same dir
 - `build-android/libunirt_jni.so` → same dir
 - llama.cpp's `libllama.so` / `libggml*.so` from the build tree → same dir
-- `bindings/android/kotlin/ai/unirt/UniRT.kt` → your source set
+- `bindings/android/kotlin/ai/unirt/**` → your source set
 
 Plugins are discovered automatically: the registry scans the directory that
 holds `libunirt.so` (the app's native lib dir) for the flat
@@ -28,16 +28,25 @@ holds `libunirt.so` (the app's native lib dir) for the flat
 
 ## Use
 
+Requires `kotlinx-coroutines-core`. `LlmSession` is an interface (fake it in
+unit tests — local JVM tests cannot load the native library); the bundled
+implementation confines all native calls to one thread per session, so every
+member is safe to call from any coroutine.
+
 ```kotlin
 UniRT.start()
-LlmSession("/data/local/tmp/SmolLM2-135M-Instruct-Q8_0.gguf").use { session ->
-    val reply = session.chat(
-        listOf(ChatMessage("user", "What is the capital of France?")),
-        onToken = { piece -> print(piece); true },
+UniRT.createLlmSession("/data/local/tmp/SmolLM2-135M-Instruct-Q8_0.gguf").use { session ->
+    val prompt = session.applyChatTemplate(
+        listOf(ChatMessage.user("What is the capital of France?"))
     )
+    session.stream(prompt).collect { piece -> print(piece) }   // cancel to stop decoding
 }
 UniRT.stop()
 ```
+
+Kotlin conventions over ceremony: default arguments instead of builders,
+`object` instead of a singleton class, `Flow` instead of listener
+interfaces.
 
 Models ship however the app prefers (assets, download at first run); pass an
 absolute filesystem path. CI cross-compiles this binding for arm64-v8a on
