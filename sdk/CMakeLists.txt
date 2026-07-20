@@ -109,7 +109,8 @@ if(UNIRT_NATIVE_TESTS)
     # Linux builds run with INSTALL_RPATH ($ORIGIN) even in the build tree,
     # and the test binaries live one directory above libunirt.so.
     set_target_properties(unirt-static-registration-test PROPERTIES
-        INSTALL_RPATH "$ORIGIN/src;$ORIGIN")
+        INSTALL_RPATH "$ORIGIN/src;$ORIGIN"
+        MACOSX_BUNDLE FALSE)  # iOS defaults executables to .app bundles
     if(UNIRT_BUILD_SHARED)
         target_compile_definitions(unirt-static-registration-test PRIVATE UNIRT_SHARED)
     endif()
@@ -123,7 +124,8 @@ if(UNIRT_NATIVE_TESTS AND UNIRT_PLUGIN_LLAMA_CPP)
     target_include_directories(unirt-inference-smoke-test PRIVATE ${COMMON_INCLUDE})
     target_link_libraries(unirt-inference-smoke-test PRIVATE unirt)
     set_target_properties(unirt-inference-smoke-test PROPERTIES
-        INSTALL_RPATH "$ORIGIN/src;$ORIGIN")
+        INSTALL_RPATH "$ORIGIN/src;$ORIGIN"
+        MACOSX_BUNDLE FALSE)
     if(UNIRT_BUILD_SHARED)
         target_compile_definitions(unirt-inference-smoke-test PRIVATE UNIRT_SHARED)
     else()
