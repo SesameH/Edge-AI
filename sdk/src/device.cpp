@@ -49,26 +49,21 @@ struct AliasRule {
 // Aliases valid on every platform.
 constexpr const char* kKnownAliases[] = {"cpu", "gpu", "npu", "hybrid"};
 
-#if defined(__APPLE__)
-// No NPU-class backend exists here; npu/hybrid degrade to the default GPU.
+// Hardware-agnostic on every platform: aliases resolve to the backend's own
+// default device (Metal on Apple, CUDA/Vulkan/CPU elsewhere — whatever the
+// build ships), and "cpu" additionally pins n_gpu_layers to 0. NPU-class
+// aliases degrade with a warning because no bundled backend drives an NPU;
+// callers targeting specific silicon pass a concrete device id instead of
+// an alias, which bypasses this resolver entirely.
 constexpr AliasRule kRules[] = {
     {"cpu", std::nullopt, 0, nullptr},
     {"gpu", std::nullopt, std::nullopt, nullptr},
-    {"npu", std::nullopt, std::nullopt, "no NPU backend on this platform; running on the default GPU"},
-    {"hybrid", std::nullopt, std::nullopt, "no NPU backend on this platform; running on the default GPU"},
+    {"npu", std::nullopt, std::nullopt,
+     "no NPU backend in this build; using the backend's default device"},
+    {"hybrid", std::nullopt, std::nullopt,
+     "no hybrid scheduling in this build; using the backend's default device"},
 };
 constexpr const char* kDefaultAlias = "gpu";
-#else
-// ARM64 Linux / Windows builds: llama.cpp exposes the NPU as "HTP0" and the
-// OpenCL GPU as "GPUOpenCL".
-constexpr AliasRule kRules[] = {
-    {"cpu", std::nullopt, 0, nullptr},
-    {"gpu", "GPUOpenCL", std::nullopt, nullptr},
-    {"npu", "HTP0", std::nullopt, nullptr},
-    {"hybrid", std::nullopt, std::nullopt, nullptr},
-};
-constexpr const char* kDefaultAlias = "npu";
-#endif
 
 }  // namespace
 
