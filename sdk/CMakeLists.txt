@@ -112,6 +112,28 @@ if(UNIRT_NATIVE_TESTS)
     add_test(NAME unirt-static-registration COMMAND unirt-static-registration-test)
 endif()
 
+if(UNIRT_NATIVE_TESTS AND UNIRT_PLUGIN_LLAMA_CPP)
+    add_executable(
+        unirt-inference-smoke-test
+        "${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/test_inference_smoke.cpp")
+    target_include_directories(unirt-inference-smoke-test PRIVATE ${COMMON_INCLUDE})
+    target_link_libraries(unirt-inference-smoke-test PRIVATE unirt)
+    if(UNIRT_BUILD_SHARED)
+        target_compile_definitions(unirt-inference-smoke-test PRIVATE UNIRT_SHARED)
+    else()
+        # Static build: link the backend in and register it in-process.
+        target_compile_definitions(unirt-inference-smoke-test PRIVATE UNIRT_SMOKE_STATIC_PLUGIN)
+        target_link_libraries(unirt-inference-smoke-test PRIVATE unirt_llama_cpp)
+    endif()
+    add_test(
+        NAME unirt-inference-smoke
+        COMMAND unirt-inference-smoke-test
+                "${CMAKE_CURRENT_SOURCE_DIR}/../models/SmolLM2-135M-Instruct-Q8_0.gguf")
+    set_tests_properties(unirt-inference-smoke PROPERTIES
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "UNIRT_PLUGIN_PATH=${CMAKE_BINARY_DIR}/plugins")
+endif()
+
 if(UNIRT_PYTHON_TESTS)
     set(UNIRT_PYTHON_TEST_EXECUTABLE "" CACHE FILEPATH "Python interpreter used for UniRT tests")
     if(NOT UNIRT_PYTHON_TEST_EXECUTABLE)

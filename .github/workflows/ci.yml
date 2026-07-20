@@ -79,8 +79,6 @@ jobs:
         run: cmake --build build -j4
       - name: Install
         run: cmake --install build --prefix sdk/pkg-unirt
-      - name: Native tests
-        run: ctest --test-dir build -R unirt-static-registration --output-on-failure
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -95,6 +93,10 @@ jobs:
         run: |
           mkdir -p models
           curl -fL -o models/SmolLM2-135M-Instruct-Q8_0.gguf "$GGUF_URL"
+      - name: Native tests
+        run: >
+          ctest --test-dir build --output-on-failure
+          -R "unirt-(static-registration|inference-smoke)"
       - name: Install Python binding
         run: |
           python -m pip install --upgrade pip
@@ -130,7 +132,7 @@ jobs:
           find build-android -name "libunirt.so" | head -1
 
   ios:
-    name: iOS arm64 (static build)
+    name: iOS arm64 (simulator tests)
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -140,23 +142,44 @@ jobs:
       - name: Compiler cache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: ios-arm64
+          key: ios-sim-arm64
       - name: Configure (static libraries; plugins register in-process)
         run: >
           cmake -S sdk -B build-ios -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64
-          -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0
+          -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator
+          -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0
           -DUNIRT_BUILD_SHARED=OFF -DBUILD_SHARED_LIBS=OFF
-          -DGGML_METAL_EMBED_LIBRARY=ON
-          -DUNIRT_NATIVE_TESTS=OFF -DUNIRT_PYTHON_TESTS=OFF
+          -DGGML_METAL=OFF
+          -DUNIRT_PYTHON_TESTS=OFF
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
       - name: Build
         run: cmake --build build-ios -j4
-      - name: Verify static archives
+      - name: Cache test model
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: models/SmolLM2-135M-Instruct-Q8_0.gguf
+          key: smollm2-135m-q8_0
+      - name: Download test model
+        if: steps.model-cache.outputs.cache-hit != 'true'
         run: |
-          ls -la build-ios/src/libunirt.a
-          find build-ios -name "libunirt_llama_cpp.a" -o -name "libllama.a" | head -3
+          mkdir -p models
+          curl -fL -o models/SmolLM2-135M-Instruct-Q8_0.gguf "$GGUF_URL"
+      - name: Boot a simulator
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          print(next(dev['udid'] for devices in data['devices'].values()
+                     for dev in devices if dev['isAvailable']))")
+          xcrun simctl boot "$UDID"
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+      - name: Run native tests inside the simulator
+        run: |
+          xcrun simctl spawn "$SIM_UDID" "$PWD/build-ios/unirt-static-registration-test"
+          xcrun simctl spawn "$SIM_UDID" "$PWD/build-ios/unirt-inference-smoke-test" \
+            "$PWD/models/SmolLM2-135M-Instruct-Q8_0.gguf"
 
   windows:
     name: ${{ matrix.label }} (llama_cpp)
