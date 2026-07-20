@@ -14,6 +14,10 @@ namespace unirt {
  *  Used as the default plugin search root. Throws on failure. */
 std::filesystem::path module_directory();
 
+/** Resident-set size of this process in bytes, or -1 when the platform
+ *  offers no way to read it. */
+int64_t resident_set_bytes() noexcept;
+
 /** Thread-local failure detail behind unirt_last_error_message(). The
  *  bridge clears it on entry to each C entrypoint and records prose when a
  *  failure has more to say than its error code. */

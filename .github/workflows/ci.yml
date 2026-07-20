@@ -62,7 +62,7 @@ jobs:
             # the same recipe as llama.cpp's own Windows ARM64 releases.
             cmake_flags: >-
               -G "Ninja Multi-Config"
-              -DCMAKE_TOOLCHAIN_FILE=$env:GITHUB_WORKSPACE/third-party/llama.cpp/cmake/arm64-windows-llvm.cmake
+              "-DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/third-party/llama.cpp/cmake/arm64-windows-llvm.cmake"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:

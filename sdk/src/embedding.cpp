@@ -10,14 +10,6 @@
 #include "bridge_support.h"
 #include "plugin/embedding_backend.h"
 
-#if defined(__APPLE__)
-#include <mach/mach.h>
-#elif defined(__linux__)
-#include <unistd.h>
-
-#include <fstream>
-#endif
-
 using namespace unirt;
 using namespace unirt::bridge;
 
@@ -36,28 +28,6 @@ bool encode_input_sane(const unirt_EmbeddingEncodeInput *input) noexcept {
   const auto batch = static_cast<size_t>(input->batch_size);
   const auto width = static_cast<size_t>(input->sequence_length);
   return batch <= std::numeric_limits<size_t>::max() / width;
-}
-
-int64_t resident_set_bytes() noexcept {
-#if defined(__APPLE__)
-  mach_task_basic_info_data_t info;
-  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
-                reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
-    return static_cast<int64_t>(info.resident_size);
-  }
-  return -1;
-#elif defined(__linux__)
-  std::ifstream statm("/proc/self/statm");
-  long total = 0;
-  long resident = 0;
-  if (statm >> total >> resident) {
-    return static_cast<int64_t>(resident) * sysconf(_SC_PAGESIZE);
-  }
-  return -1;
-#else
-  return -1;
-#endif
 }
 
 } // namespace

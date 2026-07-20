@@ -6,10 +6,19 @@
 #include <stdexcept>
 
 #if defined(_WIN32)
+#define PSAPI_VERSION 2
 #include <windows.h>
+
+#include <psapi.h>
 extern "C" IMAGE_DOS_HEADER __ImageBase;
+#elif defined(__APPLE__)
+#include <dlfcn.h>
+#include <mach/mach.h>
 #else
 #include <dlfcn.h>
+#include <unistd.h>
+
+#include <fstream>
 #endif
 
 namespace unirt {
@@ -25,6 +34,31 @@ std::filesystem::path module_directory() {
         return std::filesystem::canonical(info.dli_fname).parent_path();
     }
     throw std::runtime_error("cannot locate the unirt shared library on disk");
+#endif
+}
+
+int64_t resident_set_bytes() noexcept {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS counters{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))) {
+        return static_cast<int64_t>(counters.WorkingSetSize);
+    }
+    return -1;
+#elif defined(__APPLE__)
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t      count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info), &count) ==
+        KERN_SUCCESS) {
+        return static_cast<int64_t>(info.resident_size);
+    }
+    return -1;
+#elif defined(__linux__)
+    std::ifstream statm("/proc/self/statm");
+    long          total = 0, resident = 0;
+    if (statm >> total >> resident) return static_cast<int64_t>(resident) * sysconf(_SC_PAGESIZE);
+    return -1;
+#else
+    return -1;
 #endif
 }
 
