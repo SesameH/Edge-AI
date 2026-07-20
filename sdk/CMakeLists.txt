@@ -106,6 +106,10 @@ if(UNIRT_NATIVE_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/test_static_registration.cpp")
     target_include_directories(unirt-static-registration-test PRIVATE ${COMMON_INCLUDE})
     target_link_libraries(unirt-static-registration-test PRIVATE unirt)
+    # Linux builds run with INSTALL_RPATH ($ORIGIN) even in the build tree,
+    # and the test binaries live one directory above libunirt.so.
+    set_target_properties(unirt-static-registration-test PROPERTIES
+        INSTALL_RPATH "$ORIGIN/src;$ORIGIN")
     if(UNIRT_BUILD_SHARED)
         target_compile_definitions(unirt-static-registration-test PRIVATE UNIRT_SHARED)
     endif()
@@ -118,6 +122,8 @@ if(UNIRT_NATIVE_TESTS AND UNIRT_PLUGIN_LLAMA_CPP)
         "${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/test_inference_smoke.cpp")
     target_include_directories(unirt-inference-smoke-test PRIVATE ${COMMON_INCLUDE})
     target_link_libraries(unirt-inference-smoke-test PRIVATE unirt)
+    set_target_properties(unirt-inference-smoke-test PROPERTIES
+        INSTALL_RPATH "$ORIGIN/src;$ORIGIN")
     if(UNIRT_BUILD_SHARED)
         target_compile_definitions(unirt-inference-smoke-test PRIVATE UNIRT_SHARED)
     else()
@@ -129,9 +135,12 @@ if(UNIRT_NATIVE_TESTS AND UNIRT_PLUGIN_LLAMA_CPP)
         NAME unirt-inference-smoke
         COMMAND unirt-inference-smoke-test
                 "${CMAKE_CURRENT_SOURCE_DIR}/../models/SmolLM2-135M-Instruct-Q8_0.gguf")
+    # Plugins come from the installed tree (run `cmake --install` first —
+    # already the standard dev loop): the build tree's plugin cannot resolve
+    # its llama.cpp dependencies under Linux's $ORIGIN-only runpaths.
     set_tests_properties(unirt-inference-smoke PROPERTIES
         SKIP_RETURN_CODE 77
-        ENVIRONMENT "UNIRT_PLUGIN_PATH=${CMAKE_BINARY_DIR}/plugins")
+        ENVIRONMENT "UNIRT_PLUGIN_PATH=${CMAKE_SOURCE_DIR}/pkg-unirt/lib")
 endif()
 
 if(UNIRT_PYTHON_TESTS)
