@@ -27,6 +27,8 @@ wheelhouse/
 .idea/
 .vscode/
 
+.claude/
+**/CLAUDE.md
 # Local-only settings and secrets (HF tokens etc.)
 .claude/settings.local.json
 .env

@@ -13,6 +13,7 @@
 #include <mtmd-helper.h>
 
 #include "build_config.h"
+#include "embedding.h"
 #include "llm.h"
 #include "vlm.h"
 #include "logging.h"
@@ -76,7 +77,9 @@ class LlamaCppPlugin final : public BackendPackage {
 
     const char* version() override { return "llama.cpp-public-api/1"; }
 
-    uint32_t modalities() override { return UNIRT_MODALITY_LLM | UNIRT_MODALITY_VLM; }
+    uint32_t modalities() override {
+        return UNIRT_MODALITY_LLM | UNIRT_MODALITY_VLM | UNIRT_MODALITY_EMBEDDING;
+    }
 
     int32_t get_device_list(
         const unirt_GetDeviceListInput* input,
@@ -131,6 +134,14 @@ class LlamaCppPlugin final : public BackendPackage {
     VlmBackend* create_vlm() override {
         try {
             return new LlamaCppVlm();
+        } catch (...) {
+            return nullptr;
+        }
+    }
+
+    EmbeddingBackend* create_embedding() override {
+        try {
+            return new LlamaCppEmbedding();
         } catch (...) {
             return nullptr;
         }

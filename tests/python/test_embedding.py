@@ -122,3 +122,51 @@ def test_real_embedding_model_when_explicitly_configured(sdk):
             assert norm == pytest.approx(1.0, abs=1e-5)
     finally:
         model.close()
+
+
+def test_find_embedding_model_falls_back_to_gguf(tmp_path):
+    (tmp_path / 'encoder-Q8_0.gguf').write_bytes(b'gguf')
+    selected = _find_embedding_model(str(tmp_path), 'onnx')
+    assert selected.endswith('encoder-Q8_0.gguf')
+    assert _find_embedding_model(str(tmp_path), 'gguf') == selected
+
+
+def test_find_embedding_model_prefers_onnx_when_both_exist(tmp_path):
+    (tmp_path / 'model.onnx').write_bytes(b'onnx')
+    (tmp_path / 'encoder.gguf').write_bytes(b'gguf')
+    assert _find_embedding_model(str(tmp_path), 'onnx').endswith('model.onnx')
+    assert _find_embedding_model(str(tmp_path), 'gguf').endswith('encoder.gguf')
+
+
+def test_gguf_embedding_end_to_end(sdk):
+    from conftest import REPO_ROOT
+
+    bundle = os.path.join(REPO_ROOT, 'models', 'all-MiniLM-L6-v2-GGUF')
+    if not os.path.isdir(bundle):
+        pytest.skip('GGUF embedding bundle not downloaded (see README)')
+    if 'llama_cpp' not in sdk.get_runtime_list():
+        pytest.skip('llama_cpp plugin is unavailable')
+
+    from unirt import AutoModelForEmbedding
+
+    model = AutoModelForEmbedding.from_pretrained(bundle, device_map='cpu')
+    try:
+        vectors = model.encode([
+            'a cat sits on the mat',
+            'a kitten rests on the rug',
+            'quarterly revenue rose sharply',
+        ])
+        assert len(vectors) == 3
+        assert len(vectors[0]) == 384
+        for vector in vectors:
+            norm = sum(value * value for value in vector) ** 0.5
+            assert norm == pytest.approx(1.0, abs=1e-4)
+
+        def cosine(a, b):
+            return sum(x * y for x, y in zip(a, b))
+
+        related = cosine(vectors[0], vectors[1])
+        unrelated = cosine(vectors[0], vectors[2])
+        assert related > unrelated + 0.3
+    finally:
+        model.close()

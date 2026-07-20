@@ -609,22 +609,28 @@ def _embedding_precision(value: str | None) -> str:
     normalized = re.sub(r'[^a-z0-9]+', '-', value.casefold()).strip('-')
     if normalized in {'default', 'fp32', 'onnx', 'onnx-fp32'}:
         return 'onnx'
+    if normalized == 'gguf' or normalized.startswith('gguf-'):
+        return normalized
     return normalized if normalized.startswith('onnx-') else f'onnx-{normalized}'
 
 
 def _find_embedding_model(directory: str, precision: str) -> str:
-    candidates = []
+    onnx_candidates: list[str] = []
+    gguf_candidates: list[str] = []
     for root, dirs, files in os.walk(directory):
         dirs[:] = [name for name in dirs if name not in {'.cache', '.git'}]
-        candidates.extend(
-            os.path.join(root, name)
-            for name in files
-            if name.casefold().endswith('.onnx')
-        )
-    if not candidates:
-        raise FileNotFoundError(f'No ONNX model found in directory: {directory}')
+        for name in files:
+            lowered = name.casefold()
+            if lowered.endswith('.onnx'):
+                onnx_candidates.append(os.path.join(root, name))
+            elif lowered.endswith('.gguf'):
+                gguf_candidates.append(os.path.join(root, name))
+    if not onnx_candidates and not gguf_candidates:
+        raise FileNotFoundError(f'No ONNX or GGUF model found in directory: {directory}')
 
     def variant(path: str) -> str:
+        if path.casefold().endswith('.gguf'):
+            return 'gguf'
         stem = os.path.splitext(os.path.basename(path))[0].casefold()
         if stem in {'model', 'model-fp32', 'model_fp32'}:
             return 'onnx'
@@ -635,11 +641,15 @@ def _find_embedding_model(directory: str, precision: str) -> str:
         suffix = re.sub(r'[^a-z0-9]+', '-', stem).strip('-')
         return f'onnx-{suffix}'
 
+    candidates = onnx_candidates + gguf_candidates
     matching = [path for path in candidates if variant(path) == precision]
+    if not matching and precision == 'onnx' and not onnx_candidates:
+        # The default precision on a GGUF-only bundle means "use the GGUF".
+        matching = gguf_candidates
     if not matching:
         available = ', '.join(sorted({variant(path) for path in candidates}))
         raise ValueError(
-            f'ONNX precision {precision!r} not found in {directory}; available: {available}'
+            f'embedding precision {precision!r} not found in {directory}; available: {available}'
         )
     return min(
         matching,
@@ -733,9 +743,11 @@ def _embedding_max_length(bundle_dir: str, tokenizer_path: str, requested: int |
     return min(values) if values else 512
 
 
-def _resolve_embedding_device(device_map: str, model_name: str) -> tuple[str, str]:
+def _resolve_embedding_device(device_map: str, model_name: str, model_path: str) -> tuple[str, str]:
     if not isinstance(device_map, str) or not device_map or '\x00' in device_map:
         raise ValueError('device_map must be a non-empty NUL-free string')
+    if model_path.casefold().endswith('.gguf'):
+        return _resolve_gguf_embedding_device(device_map, model_name)
     if PLUGIN_ONNXRUNTIME not in get_runtime_list():
         raise RuntimeError('the ONNX Runtime plugin is not installed or failed to load')
     requested = device_map.strip().casefold()
@@ -753,6 +765,26 @@ def _resolve_embedding_device(device_map: str, model_name: str) -> tuple[str, st
     if device not in available:
         raise RuntimeError(f'ONNX Runtime device {device!r} is unavailable for {model_name!r}')
     return PLUGIN_ONNXRUNTIME, device
+
+
+def _resolve_gguf_embedding_device(device_map: str, model_name: str) -> tuple[str, str]:
+    if PLUGIN_LLAMA_CPP not in get_runtime_list():
+        raise RuntimeError(
+            f'{model_name!r} is a GGUF embedding model but the llama_cpp plugin is not available'
+        )
+    requested = device_map.strip().casefold()
+    if requested in {'auto', 'gpu', PLUGIN_LLAMA_CPP, f'{PLUGIN_LLAMA_CPP}:gpu'}:
+        # Empty device id lets llama.cpp pick its default (Metal on Apple).
+        return PLUGIN_LLAMA_CPP, ''
+    if requested in {'cpu', f'{PLUGIN_LLAMA_CPP}:cpu'}:
+        return PLUGIN_LLAMA_CPP, 'cpu'
+    if ':' in requested:
+        plugin, device = requested.split(':', 1)
+        if plugin == PLUGIN_LLAMA_CPP and device:
+            return PLUGIN_LLAMA_CPP, device
+    raise ValueError(
+        "GGUF embedding device_map must be 'auto', 'cpu', 'gpu', or 'llama_cpp:<device>'"
+    )
 
 
 class AutoModelForEmbedding:
@@ -791,7 +823,7 @@ class AutoModelForEmbedding:
             progress,
         )
         resolved_name = model_name or discovered_name
-        plugin_id, device_id = _resolve_embedding_device(device_map, resolved_name)
+        plugin_id, device_id = _resolve_embedding_device(device_map, resolved_name, model_path)
         resolved_max_length = _embedding_max_length(bundle_dir, resolved_tokenizer, max_length)
         input_value = unirt_EmbeddingCreateInput(
             model_name=resolved_name.encode('utf-8'),
@@ -812,7 +844,9 @@ class AutoModelForEmbedding:
                 'model_name': resolved_name,
                 'backend': plugin_id,
                 'device': device_id,
-                'precision': _embedding_precision(precision),
+                'precision': 'gguf'
+                if model_path.casefold().endswith('.gguf')
+                else _embedding_precision(precision),
                 'model_path': model_path,
             },
         )

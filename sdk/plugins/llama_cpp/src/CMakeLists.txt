@@ -1,4 +1,4 @@
-add_library(unirt_llama_cpp SHARED plugin.cpp llm.cpp vlm.cpp)
+add_library(unirt_llama_cpp SHARED plugin.cpp llm.cpp vlm.cpp embedding.cpp)
 
 target_compile_definitions(unirt_llama_cpp PUBLIC UNIRT_SHARED)
 

@@ -19,7 +19,7 @@ PLUGIN_INVALID = -1211
 def test_plugin_modalities_declared(sdk):
     plugins = set(sdk.get_runtime_list())
     assert 'llama_cpp' in plugins
-    assert sdk.get_plugin_modalities('llama_cpp') == {'llm', 'vlm'}
+    assert sdk.get_plugin_modalities('llama_cpp') == {'llm', 'vlm', 'embedding'}
     if 'mlx' in plugins:
         assert sdk.get_plugin_modalities('mlx') == {'llm'}
     if 'onnxruntime' in plugins:
