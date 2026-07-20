@@ -167,7 +167,46 @@ def test_server_main_accepts_hf_vlm_and_does_not_request_llm_stats(monkeypatch, 
 
     server.main()
 
-    assert loaded == [('acme/vision-GGUF', {'device_map': 'llama_cpp'})]
+    assert loaded == [('acme/vision-GGUF', {'device_map': 'llama_cpp', 'n_ctx': 0})]
     assert served == [(model, 'vision-GGUF', '127.0.0.1', 9000)]
     assert model.closed
     assert 'VLM: vision' in capsys.readouterr().out
+
+
+def test_cors_headers_for_browser_clients():
+    """Regression for browser-based clients: preflight OPTIONS must succeed
+    and every response must carry Access-Control-Allow-Origin."""
+    import http.client
+
+    httpd = server.UniRTHTTPServer(('127.0.0.1', 0), FakeModel(), 'fake-model')
+    port = httpd.server_address[1]
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            connection.request(
+                'OPTIONS',
+                '/v1/chat/completions',
+                headers={
+                    'Origin': 'http://localhost:3000',
+                    'Access-Control-Request-Method': 'POST',
+                },
+            )
+            preflight = connection.getresponse()
+            preflight.read()
+            assert preflight.status == 204
+            assert preflight.getheader('Access-Control-Allow-Origin') == '*'
+            assert 'POST' in (preflight.getheader('Access-Control-Allow-Methods') or '')
+
+            connection.request('GET', '/v1/models', headers={'Origin': 'http://localhost:3000'})
+            listing = connection.getresponse()
+            listing.read()
+            assert listing.status == 200
+            assert listing.getheader('Access-Control-Allow-Origin') == '*'
+        finally:
+            connection.close()
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()

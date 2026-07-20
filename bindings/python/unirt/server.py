@@ -243,9 +243,17 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- helpers ----
 
+    def _cors(self) -> None:
+        # Browser clients (web UIs on another origin) need these on every
+        # response; the API carries no cookies, so a wildcard is safe.
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+
     def _json(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
         self.send_response(code)
+        self._cors()
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -256,6 +264,14 @@ class Handler(BaseHTTPRequestHandler):
         self._json(code, {'error': {'message': message, 'type': 'invalid_request_error'}})
 
     # ---- routes ----
+
+    def do_OPTIONS(self):
+        # CORS preflight for browser-based clients.
+        self.send_response(204)
+        self._cors()
+        self.send_header('Access-Control-Max-Age', '86400')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
 
     def do_GET(self):
         model_id = self.server.model_id
@@ -359,6 +375,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _stream_completion(self, prompt: str, gen_kwargs: dict) -> None:
         self.send_response(200)
+        self._cors()
         self.send_header('Content-Type', 'text/event-stream')
         self.send_header('Cache-Control', 'no-cache')
         self.send_header('Transfer-Encoding', 'chunked')
@@ -457,12 +474,22 @@ def main() -> None:
     ap.add_argument('--backend', choices=['llama_cpp', 'mlx'], default='llama_cpp')
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=8080)
+    ap.add_argument(
+        '--n-ctx',
+        type=int,
+        default=0,
+        help='context window in tokens (0 = the model default)',
+    )
     args = ap.parse_args()
+    if args.n_ctx < 0:
+        ap.error('--n-ctx must be >= 0')
 
     model_source = os.path.abspath(args.model) if os.path.exists(args.model) else args.model
     model_id = os.path.splitext(os.path.basename(args.model.rstrip('/')))[0]
     print(f'loading {model_source} on {args.backend} ...')
-    model = AutoModelForCausalLM.from_pretrained(model_source, device_map=args.backend)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_source, device_map=args.backend, n_ctx=args.n_ctx
+    )
     try:
         if isinstance(model, UniRTVLM):
             capabilities = ', '.join(

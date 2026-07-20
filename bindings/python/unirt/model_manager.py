@@ -50,13 +50,9 @@ __all__ = [
 ]
 
 
-# These values remain public for source compatibility with older callers.
+# The only model sources UniRT supports.
 UNIRT_HUB_AUTO = 0
 UNIRT_HUB_HUGGINGFACE = 1
-UNIRT_HUB_MODELSCOPE = 2
-UNIRT_HUB_AIHUB = 3
-UNIRT_HUB_VOLCES = 4
-UNIRT_HUB_DOCKER = 5
 UNIRT_HUB_LOCALFS = 127
 
 UNIRT_ERROR_COMMON_UNKNOWN = -1000
@@ -863,18 +859,13 @@ def pull(
 ) -> None:
     """Download one model variant into the UniRT store.
 
-    ``hub`` accepts ``"auto"``/``"hf"`` and ``"localfs"``. Historical
-    AI Hub and Docker values raise a focused not-supported error.
+    ``hub`` accepts ``"auto"``/``"hf"`` and ``"localfs"``; anything else
+    raises a focused not-supported error.
     """
 
     del display_name
     repo_id, wanted = _resolve_name(model_name, precision)
     hub_value = _resolve_hub(hub)
-    if hub_value not in {UNIRT_HUB_AUTO, UNIRT_HUB_HUGGINGFACE, UNIRT_HUB_LOCALFS}:
-        _raise(
-            UNIRT_ERROR_COMMON_NOT_SUPPORTED,
-            'only Hugging Face and local filesystem sources are supported by the Python model manager',
-        )
     if hub_value == UNIRT_HUB_LOCALFS and not local_path:
         _raise(UNIRT_ERROR_COMMON_INVALID_INPUT, 'local_path is required for hub="localfs"')
     if hub_value != UNIRT_HUB_LOCALFS and local_path:
@@ -953,34 +944,35 @@ def query(
             for path in directory.rglob('*')
             if path.is_file() and path.name != _MANIFEST
         ]
-    elif hub_value in {UNIRT_HUB_AUTO, UNIRT_HUB_HUGGINGFACE}:
+    else:
         token = hf_token or os.environ.get('UNIRT_HFTOKEN') or None
         files = _remote_files(repo_id, token)
-    else:
-        _raise(UNIRT_ERROR_COMMON_NOT_SUPPORTED, 'query supports Hugging Face and localfs only')
     plan = _plan(repo_id, files, precision)
     return ModelInspection(plan.model_name, plan.runtime, plan.model_type, list(plan.candidates))
 
 
 def _resolve_hub(hub: str | int) -> int:
-    if isinstance(hub, int):
-        return hub
     values = {
         'auto': UNIRT_HUB_AUTO,
         'hf': UNIRT_HUB_HUGGINGFACE,
         'huggingface': UNIRT_HUB_HUGGINGFACE,
         'local': UNIRT_HUB_LOCALFS,
         'localfs': UNIRT_HUB_LOCALFS,
-        'aihub': UNIRT_HUB_AIHUB,
-        'docker': UNIRT_HUB_DOCKER,
-        'dockerhub': UNIRT_HUB_DOCKER,
-        'modelscope': UNIRT_HUB_MODELSCOPE,
-        'volces': UNIRT_HUB_VOLCES,
     }
-    try:
-        return values[hub.lower()]
-    except (AttributeError, KeyError):
-        raise ValueError(f'unknown hub: {hub!r}') from None
+    if isinstance(hub, int):
+        if hub in {UNIRT_HUB_AUTO, UNIRT_HUB_HUGGINGFACE, UNIRT_HUB_LOCALFS}:
+            return hub
+    else:
+        try:
+            return values[hub.lower()]
+        except (AttributeError, KeyError):
+            pass
+    _raise(
+        UNIRT_ERROR_COMMON_NOT_SUPPORTED,
+        f'hub {hub!r} is not supported: only Hugging Face ("hf"/"auto") and '
+        'the local filesystem ("localfs") are available',
+    )
+    raise AssertionError('unreachable')
 
 
 def resolve_effective_hub(model_name: str, hub: str | int = 'auto') -> int:
