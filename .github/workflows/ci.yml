@@ -63,9 +63,15 @@ jobs:
             # Relative CMAKE_TOOLCHAIN_FILE resolves against the build dir;
             # ../ lands on the repo root. (github.workspace is empty inside
             # matrix values, and pwsh does not expand $env: in -D tokens.)
+            # The explicit --target overrides clang's default triple: choco
+            # may install an x64 LLVM whose default is x86_64, which compiled
+            # the generic ggml sources for the wrong arch (duplicate symbols
+            # against the arm-specific sources at link time).
             cmake_flags: >-
               -G "Ninja Multi-Config"
               -DCMAKE_TOOLCHAIN_FILE=../third-party/llama.cpp/cmake/arm64-windows-llvm.cmake
+              -DCMAKE_C_FLAGS=--target=arm64-pc-windows-msvc
+              -DCMAKE_CXX_FLAGS=--target=arm64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -78,6 +84,14 @@ jobs:
           choco install ninja llvm -y
           Add-Content $env:GITHUB_PATH "C:\Program Files\LLVM\bin"
           Add-Content $env:GITHUB_PATH "C:\ProgramData\chocolatey\bin"
+      - name: Toolchain diagnostics (arm64)
+        if: matrix.os == 'windows-11-arm'
+        shell: bash
+        run: |
+          which clang ninja
+          clang --version
+          echo 'int main(void){return 0;}' > probe.c
+          clang -v -c probe.c -o probe.obj 2>&1 | grep -i -m1 target || true
       - name: Configure
         run: >
           cmake -S sdk -B build ${{ matrix.cmake_flags }}
