@@ -60,9 +60,12 @@ jobs:
             label: Windows arm64
             # llama.cpp refuses MSVC on ARM; use its clang toolchain file,
             # the same recipe as llama.cpp's own Windows ARM64 releases.
+            # Relative CMAKE_TOOLCHAIN_FILE resolves against the build dir;
+            # ../ lands on the repo root. (github.workspace is empty inside
+            # matrix values, and pwsh does not expand $env: in -D tokens.)
             cmake_flags: >-
               -G "Ninja Multi-Config"
-              "-DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/third-party/llama.cpp/cmake/arm64-windows-llvm.cmake"
+              -DCMAKE_TOOLCHAIN_FILE=../third-party/llama.cpp/cmake/arm64-windows-llvm.cmake
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
