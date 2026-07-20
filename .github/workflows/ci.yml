@@ -46,6 +46,28 @@ jobs:
       - name: Run tests
         run: python -m pytest tests/python -q
 
+  android:
+    name: Android arm64-v8a (build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch llama.cpp submodule
+        run: git submodule update --init --depth 1 third-party/llama.cpp
+      - name: Configure (NDK cross-compile, JNI binding included)
+        run: >
+          cmake -S bindings/android/jni -B build-android
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake
+          -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28
+          -DCMAKE_BUILD_TYPE=Release
+          -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
+      - name: Build
+        run: cmake --build build-android -j4
+      - name: Verify outputs
+        run: |
+          ls -la build-android/libunirt_jni.so build-android/plugins/libunirt_plugin_llama_cpp.so
+          find build-android -name "libunirt.so" | head -1
+
   windows:
     name: ${{ matrix.label }} (llama_cpp)
     strategy:

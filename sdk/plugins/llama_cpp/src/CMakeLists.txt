@@ -8,11 +8,19 @@ target_link_libraries(unirt_llama_cpp
     PUBLIC  llama mtmd
     PRIVATE unirt)
 
-set_target_properties(unirt_llama_cpp PROPERTIES
-    OUTPUT_NAME "unirt_plugin"
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/llama_cpp"
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/llama_cpp"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/llama_cpp")
+if(ANDROID)
+    # Android packs every .so flat into the app's lib dir; the registry
+    # discovers flat plugins by the libunirt_plugin_<id>.so naming.
+    set_target_properties(unirt_llama_cpp PROPERTIES
+        OUTPUT_NAME "unirt_plugin_llama_cpp"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins")
+else()
+    set_target_properties(unirt_llama_cpp PROPERTIES
+        OUTPUT_NAME "unirt_plugin"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/llama_cpp"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/llama_cpp"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/llama_cpp")
+endif()
 
 if(APPLE)
     set_target_properties(unirt_llama_cpp PROPERTIES

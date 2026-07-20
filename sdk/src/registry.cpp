@@ -33,6 +33,27 @@ const char* platform_plugin_filename() {
 #endif
 }
 
+// Flat layouts (Android app lib dirs, single-directory installs) name each
+// plugin `<prefix><id><suffix>` beside libunirt instead of nesting it in a
+// per-plugin subdirectory.
+const char* flat_plugin_prefix() {
+#if defined(_WIN32)
+    return "unirt_plugin_";
+#else
+    return "libunirt_plugin_";
+#endif
+}
+
+const char* flat_plugin_suffix() {
+#if defined(_WIN32)
+    return ".dll";
+#elif defined(__APPLE__)
+    return ".dylib";
+#else
+    return ".so";
+#endif
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -174,9 +195,20 @@ void PluginDirectory::discover() {
 
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& entry : std::filesystem::directory_iterator(root)) {
-        if (!entry.is_directory()) continue;
-        const auto candidate = entry.path() / platform_plugin_filename();
-        if (!std::filesystem::is_regular_file(candidate)) continue;
+        std::filesystem::path candidate;
+        if (entry.is_directory()) {
+            candidate = entry.path() / platform_plugin_filename();
+            if (!std::filesystem::is_regular_file(candidate)) continue;
+        } else if (entry.is_regular_file()) {
+            const std::string name = entry.path().filename().string();
+            if (name.rfind(flat_plugin_prefix(), 0) != 0 ||
+                entry.path().extension() != flat_plugin_suffix()) {
+                continue;
+            }
+            candidate = entry.path();
+        } else {
+            continue;
+        }
 
         try {
             PluginSlot slot = PluginSlot::from_library(candidate);
