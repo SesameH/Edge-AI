@@ -47,7 +47,6 @@ class unirt_GetDeviceListOutput(Structure):
 class unirt_ResolveDeviceInput(Structure):
     _fields_ = [
         ('plugin_id', c_char_p),
-        ('model_name', c_char_p),
         ('mode', c_char_p),
         ('ngl_default', c_int32),
     ]
@@ -120,18 +119,12 @@ class unirt_ModelConfig(Structure):
         ('n_gpu_layers', c_int32),
         ('chat_template_path', c_char_p),
         ('chat_template_content', c_char_p),
-        ('system_prompt', c_char_p),
-        ('enable_sampling', c_bool),
         ('grammar_str', c_char_p),
-        ('max_tokens', c_int32),
-        ('enable_thinking', c_bool),
-        ('verbose', c_bool),
     ]
 
 
 class unirt_LlmCreateInput(Structure):
     _fields_ = [
-        ('model_name', c_char_p),
         ('model_path', c_char_p),
         ('tokenizer_path', c_char_p),
         ('config', unirt_ModelConfig),
@@ -231,7 +224,6 @@ class unirt_VlmChatMessage(Structure):
 
 class unirt_VlmCreateInput(Structure):
     _fields_ = [
-        ('model_name', c_char_p),
         ('model_path', c_char_p),
         ('mmproj_path', c_char_p),
         ('config', unirt_ModelConfig),
@@ -280,7 +272,6 @@ class unirt_VlmGenerateOutput(Structure):
 
 class unirt_EmbeddingCreateInput(Structure):
     _fields_ = [
-        ('model_name', c_char_p),
         ('model_path', c_char_p),
         ('plugin_id', c_char_p),
         ('device_id', c_char_p),

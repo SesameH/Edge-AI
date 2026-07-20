@@ -101,13 +101,13 @@ def test_mlx_without_metal_is_rejected_before_model_allocation(monkeypatch):
 
 def test_model_config_rejects_lossy_or_unknown_values():
     with pytest.raises(TypeError, match='n_ctx must be an integer'):
-        auto._build_model_config('llama_cpp', 1.5, -1)
+        auto._build_model_config(1.5, -1)
     with pytest.raises(TypeError, match='n_threads must be an integer'):
-        auto._build_model_config('llama_cpp', 0, -1, n_threads=2.5)
+        auto._build_model_config(0, -1, n_threads=2.5)
     with pytest.raises(TypeError, match='unknown model configuration argument'):
-        auto._build_model_config('llama_cpp', 0, -1, typo_option=True)
+        auto._build_model_config(0, -1, typo_option=True)
     with pytest.raises(ValueError, match='NUL-free'):
-        auto._build_model_config('llama_cpp', 0, -1, system_prompt='bad\x00prompt')
+        auto._build_model_config(0, -1, grammar_str='bad\x00grammar')
 
 
 def test_dispatch_strings_reject_embedded_nul():

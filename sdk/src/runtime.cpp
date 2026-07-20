@@ -125,17 +125,6 @@ int32_t unirt_deinit(void) {
     });
 }
 
-int32_t unirt_register_plugin(unirt_plugin_id_func plugin_id_func, unirt_create_plugin_func create_func) {
-    UNIRT_LOG_DEBUG("registering in-process plugin");
-    if (!plugin_id_func || !create_func) return UNIRT_ERROR_COMMON_INVALID_INPUT;
-
-    return bridge::shielded("runtime.register_plugin", UNIRT_ERROR_COMMON_PLUGIN_INVALID, [&]() -> int32_t {
-        PluginDirectory::instance().adopt(
-            reinterpret_cast<void*>(plugin_id_func), reinterpret_cast<void*>(create_func));
-        return UNIRT_SUCCESS;
-    });
-}
-
 int32_t unirt_set_log(unirt_log_callback callback) {
     unirt_log.store(callback ? callback : stderr_log_sink, std::memory_order_release);
     return UNIRT_SUCCESS;

@@ -182,7 +182,7 @@ int32_t run_generation(Interface& backend, const GenInput* input, GenOutput* out
 inline bool model_config_sane(const unirt_ModelConfig& config) noexcept {
     return config.n_ctx >= 0 && config.n_threads >= 0 && config.n_threads_batch >= 0 &&
            config.n_batch >= 0 && config.n_ubatch >= 0 && config.n_seq_max >= 0 &&
-           config.n_gpu_layers >= -1 && config.max_tokens >= 0;
+           config.n_gpu_layers >= -1;
 }
 
 /** Field checks shared by both modalities' generation configs. Media counts

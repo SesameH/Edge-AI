@@ -89,7 +89,6 @@ def _ensure_downloaded(
     quant: str | None,
     *,
     hub: str = 'auto',
-    display_name: str | None = None,
     local_path: str | None = None,
 ) -> _models.ModelFiles | None:
     if os.path.exists(model):
@@ -110,7 +109,6 @@ def _ensure_downloaded(
                     hub=hub,
                     local_path=local_path,
                     hf_token=os.environ.get('UNIRT_HFTOKEN'),
-                    display_name=display_name,
                     on_progress=progress,
                 )
                 key = f'{model}:{quant}' if quant else model
@@ -347,7 +345,6 @@ def _cmd_chat(arguments: argparse.Namespace) -> int:
         arguments.model,
         arguments.quant,
         hub=arguments.hub,
-        display_name=arguments.display_name,
         local_path=arguments.local_path,
     )
     display = (
@@ -417,7 +414,6 @@ def _cmd_pull(arguments: argparse.Namespace) -> int:
         arguments.model,
         arguments.quant,
         hub=arguments.hub,
-        display_name=arguments.display_name,
         local_path=arguments.local_path,
     )
     return 0
@@ -553,7 +549,6 @@ def _add_hub_args(parser: argparse.ArgumentParser) -> None:
         default='auto',
         help='Source hub (default: auto = HuggingFace)',
     )
-    parser.add_argument('--display-name', default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         '--local-path',
         default=None,

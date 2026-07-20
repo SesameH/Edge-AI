@@ -419,16 +419,14 @@ def _read_owned_string(pointer_value: int | None) -> str | None:
 
 def resolve_device(
     plugin_id: str,
-    model_name: str | None,
     mode: str | None,
     ngl_default: int,
 ) -> tuple[str | None, int, str | None]:
     _ensure_bound()
     if not isinstance(plugin_id, str) or not plugin_id or '\x00' in plugin_id:
         raise ValueError('plugin_id must be a non-empty NUL-free string')
-    for label, value in (('model_name', model_name), ('mode', mode)):
-        if value is not None and (not isinstance(value, str) or '\x00' in value):
-            raise ValueError(f'{label} must be a NUL-free string or None')
+    if mode is not None and (not isinstance(mode, str) or '\x00' in mode):
+        raise ValueError('mode must be a NUL-free string or None')
     if not isinstance(ngl_default, int) or isinstance(ngl_default, bool):
         raise TypeError('ngl_default must be an integer')
     if not -(2**31) <= ngl_default <= 2**31 - 1:
@@ -437,7 +435,6 @@ def resolve_device(
     library = load_library()
     input_value = unirt_ResolveDeviceInput(
         plugin_id=plugin_id.encode('utf-8'),
-        model_name=_encode(model_name),
         mode=_encode(mode),
         ngl_default=ngl_default,
     )

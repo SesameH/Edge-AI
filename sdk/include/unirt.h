@@ -175,8 +175,7 @@ typedef bool (*unirt_token_callback)(const char* token, void* user_data);
 
 /**
  * @brief Bring up the runtime: scan the plugin directory and prepare the
- *        registry. Call once before any other API except unirt_set_log()
- *        and unirt_register_plugin().
+ *        registry. Call once before any other API except unirt_set_log().
  *
  * @return UNIRT_SUCCESS, or UNIRT_ERROR_COMMON_ALREADY_INITIALIZED on a
  *         repeated call.
@@ -197,26 +196,6 @@ UNIRT_API int32_t unirt_init(void);
  * @thread_safety: Not thread-safe.
  */
 UNIRT_API int32_t unirt_deinit(void);
-
-/** Factory signature: returns the plugin's identifier string. */
-typedef unirt_PluginId (*unirt_plugin_id_func)();
-
-/** Factory signature: returns a new plugin instance as an opaque pointer. */
-typedef void* (*unirt_create_plugin_func)();
-
-/**
- * @brief Register an in-process (statically linked) plugin, bypassing the
- *        dynamic-library scan. Useful on platforms where dlopen is
- *        unavailable or for embedding a custom backend.
- *
- * @param plugin_id_func[in]: Returns the plugin's id string.
- * @param create_func[in]:    Constructs the plugin instance.
- *
- * @return UNIRT_SUCCESS on success, negative on failure.
- *
- * @thread_safety: Thread-safe.
- */
-UNIRT_API int32_t unirt_register_plugin(unirt_plugin_id_func plugin_id_func, unirt_create_plugin_func create_func);
 
 /**
  * @brief Route library logging to a custom sink. Install before unirt_init()
@@ -340,9 +319,6 @@ UNIRT_API int32_t unirt_get_device_list(const unirt_GetDeviceListInput* input, u
  * "pick the plugin default" spellings — NULL, "" and "auto". Matching is
  * case-insensitive and ignores surrounding whitespace.
  *
- * `model_name` is an optional hint (may be NULL); the resolver ignores it
- * today and it is reserved for per-model defaults.
- *
  * `ngl_default` is the caller's preferred `n_gpu_layers`. It flows through
  * unchanged for gpu / npu / hybrid on llama_cpp-style plugins; negative
  * means "offload all layers", so callers express both "everything" and
@@ -350,7 +326,6 @@ UNIRT_API int32_t unirt_get_device_list(const unirt_GetDeviceListInput* input, u
  */
 typedef struct {
     unirt_PluginId plugin_id;   /**< Which backend to consult (required) */
-    const char*     model_name;  /**< Model name, used only as a routing hint; optional */
     const char*     mode;        /**< User-facing alias; NULL / "" / "auto" → plugin default */
     int32_t         ngl_default; /**< Fallback n_gpu_layers when the alias implies none */
 } unirt_ResolveDeviceInput;
@@ -487,16 +462,10 @@ typedef struct {
     int32_t n_seq_max;        // max concurrent sequences (recurrent-model states)
     int32_t n_gpu_layers;     // layers offloaded to the device; 0 = all on CPU
 
-    // Prompt-formatting extras. Candidates for a separate struct in the next
-    // ABI revision; kept here for layout stability.
+    // Prompt-formatting extras.
     unirt_Path chat_template_path;     // external file overriding the model's chat template (optional)
     const char* chat_template_content;  // inline chat template override (optional)
-    const char* system_prompt;          // default system prompt (optional)
-    bool        enable_sampling;        // DEPRECATED — use unirt_SamplerConfig.enable_json
     const char* grammar_str;            // default grammar applied to every request
-    int32_t     max_tokens;             // default generation budget
-    bool        enable_thinking;        // reasoning/thinking mode for models that support it
-    bool        verbose;                // extra load-time logging
 } unirt_ModelConfig;
 
 /* ========================================================================== */
@@ -508,7 +477,6 @@ typedef struct unirt_LLM unirt_LLM; /* Opaque LLM handle */
 /* --------------------  Lifecycle  ---------------------------------------- */
 
 typedef struct {
-    const char*        model_name;     /** Display name for logs/telemetry */
     unirt_Path        model_path;     /** Model weights (file or directory, plugin-dependent) */
     unirt_Path        tokenizer_path; /** Tokenizer file; NULL when bundled with the model */
     unirt_ModelConfig config;         /** Load-time settings */
@@ -751,7 +719,6 @@ typedef struct unirt_VLM unirt_VLM; /* Opaque VLM handle */
 /* --------------------  Lifecycle  ----------------------------------------- */
 
 typedef struct {
-    const char*        model_name;     /** Display name for logs/telemetry */
     unirt_Path        model_path;     /** Language-model weights */
     unirt_Path        mmproj_path;    /** Multimodal projector weights */
     unirt_ModelConfig config;         /** Load-time settings */
@@ -899,7 +866,6 @@ typedef enum {
  *  stays outside the plugin so WordPiece, BPE and SentencePiece callers can
  *  all use the same native inference ABI. */
 typedef struct {
-    const char*             model_name;  /**< Display name for logs/telemetry */
     unirt_Path              model_path;  /**< ONNX model file */
     unirt_PluginId          plugin_id;   /**< Backend, normally "onnxruntime" */
     const char*             device_id;   /**< Concrete device id; NULL = plugin default */

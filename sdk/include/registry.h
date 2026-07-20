@@ -60,9 +60,6 @@ class PluginSlot {
      *  Throws std::runtime_error with a reason on any failure. */
     static PluginSlot from_library(const std::filesystem::path& path);
 
-    /** Wrap in-process factory functions (unirt_register_plugin). */
-    static PluginSlot from_functions(IdentityFn identity, FactoryFn factory);
-
     const std::string& id() const noexcept { return id_; }
 
     /** The package, opened on first use: calls the factory, validates the
@@ -94,9 +91,6 @@ class PluginDirectory {
     /** Scan the plugin root (UNIRT_PLUGIN_PATH or the directory holding
      *  libunirt) for `<subdir>/<platform plugin name>` and load each. */
     void discover();
-
-    /** Register an in-process backend from its exported functions. */
-    void adopt(void* identity_fn, void* factory_fn);
 
     /** Destroy every plugin instance and unload their libraries. */
     void unload_all();

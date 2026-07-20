@@ -364,7 +364,6 @@ static void fill_model_config(const bench_options* options, int32_t ngl, unirt_M
     config->n_ctx        = options->n_ctx;
     config->n_threads    = options->n_threads;
     config->n_gpu_layers = ngl;
-    config->max_tokens   = options->n_generate;
 }
 
 static void copy_profile(int32_t index, const unirt_ProfileData* profile, bench_run* run) {
@@ -406,7 +405,6 @@ static int32_t* make_random_prompt(unirt_LLM* model, const bench_options* option
 static void run_llm(const bench_options* options, const char* device_id, int32_t ngl, bench_run* measured) {
     unirt_LlmCreateInput create;
     memset(&create, 0, sizeof(create));
-    create.model_name     = "unirt-bench";
     create.model_path     = options->model_path;
     create.tokenizer_path = options->tokenizer_path;
     create.plugin_id      = options->plugin;
@@ -516,7 +514,6 @@ static void verify_vlm_media(unirt_VLM* model, const bench_options* options) {
 static void run_vlm(const bench_options* options, const char* device_id, int32_t ngl, bench_run* measured) {
     unirt_VlmCreateInput create;
     memset(&create, 0, sizeof(create));
-    create.model_name     = "unirt-bench";
     create.model_path     = options->model_path;
     create.mmproj_path    = options->mmproj_path;
     create.tokenizer_path = options->tokenizer_path;

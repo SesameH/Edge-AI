@@ -80,15 +80,9 @@ def _apply_plugin_hint(device_map: str, plugin_id: str | None) -> str:
 
 def _call_sdk(
     plugin_id: str,
-    model_name: str | None,
     alias: str | None,
 ) -> tuple[str, str | None, int | None]:
-    device_id, n_gpu_layers, warning = resolve_device(
-        plugin_id,
-        model_name,
-        alias,
-        -1,
-    )
+    device_id, n_gpu_layers, warning = resolve_device(plugin_id, alias, -1)
     if warning:
         _logger.warning('%s', warning)
     override = None if n_gpu_layers == -1 else n_gpu_layers
@@ -97,7 +91,6 @@ def _call_sdk(
 
 def resolve_device_map(
     device_map: str,
-    model_name: str | None = None,
 ) -> tuple[str | None, str | None, int | None]:
     """Resolve auto, aliases, plugin ids, and ``plugin:device`` strings."""
     if not isinstance(device_map, str) or '\x00' in device_map:
@@ -107,7 +100,7 @@ def resolve_device_map(
 
     if not requested or normalized == 'auto':
         runtime = _preferred_runtime(get_runtime_list())
-        return (None, None, None) if runtime is None else _call_sdk(runtime, model_name, None)
+        return (None, None, None) if runtime is None else _call_sdk(runtime, None)
 
     if normalized in _DEVICE_ALIASES:
         runtimes = get_runtime_list()
@@ -115,10 +108,10 @@ def resolve_device_map(
         runtime = owner if owner in runtimes else _preferred_runtime(runtimes)
         if runtime is None:
             runtime = PLUGIN_LLAMA_CPP
-        return _call_sdk(runtime, model_name, normalized)
+        return _call_sdk(runtime, normalized)
 
     if ':' not in requested:
-        return _call_sdk(requested, model_name, None)
+        return _call_sdk(requested, None)
 
     plugin_id, device_id = (part.strip() for part in requested.split(':', 1))
     if not plugin_id or not device_id:
@@ -126,7 +119,7 @@ def resolve_device_map(
             "device_map must use '<runtime>:<compute-unit>' with both parts non-empty"
         )
     if device_id.lower() in _DEVICE_ALIASES:
-        return _call_sdk(plugin_id, model_name, device_id.lower())
+        return _call_sdk(plugin_id, device_id.lower())
     return plugin_id, device_id, None
 
 
@@ -417,13 +410,10 @@ _MODEL_INT_FIELDS = frozenset({
     'n_batch',
     'n_ubatch',
     'n_seq_max',
-    'max_tokens',
 })
-_MODEL_BOOL_FIELDS = frozenset({'enable_sampling', 'enable_thinking', 'verbose'})
 _MODEL_TEXT_FIELDS = frozenset({
     'chat_template_path',
     'chat_template_content',
-    'system_prompt',
     'grammar_str',
 })
 
@@ -437,12 +427,10 @@ def _checked_int(name: str, value, minimum: int = 0) -> int:
 
 
 def _build_model_config(
-    plugin_id: str | None,
     n_ctx: int,
     n_gpu_layers: int,
     **kwargs,
 ) -> unirt_ModelConfig:
-    del plugin_id
     config = unirt_ModelConfig(
         n_ctx=_checked_int('n_ctx', n_ctx),
         n_gpu_layers=_checked_int('n_gpu_layers', n_gpu_layers, -1),
@@ -450,10 +438,6 @@ def _build_model_config(
     for name, value in kwargs.items():
         if name in _MODEL_INT_FIELDS:
             setattr(config, name, _checked_int(name, value))
-        elif name in _MODEL_BOOL_FIELDS:
-            if not isinstance(value, bool):
-                raise TypeError(f'{name} must be a boolean')
-            setattr(config, name, value)
         elif name in _MODEL_TEXT_FIELDS:
             if value is not None and (
                 not isinstance(value, str) or '\x00' in value
@@ -506,17 +490,14 @@ def _prepare_load(
     )
     runtime_hint = (paths.runtime if paths else None) or _runtime_for_model_path(model_path)
     requested_device = _apply_plugin_hint(device_map, runtime_hint)
-    plugin_id, device_id, layer_override = resolve_device_map(
-        requested_device,
-        resolved_name,
-    )
+    plugin_id, device_id, layer_override = resolve_device_map(requested_device)
     _validate_runtime_for_model(plugin_id, model_path)
     _require_available_backend(plugin_id)
     if layer_override is not None:
         n_gpu_layers = layer_override
 
     resolved_tokenizer = tokenizer_path or discovered_tokenizer
-    config = _build_model_config(plugin_id, n_ctx, n_gpu_layers, **kwargs)
+    config = _build_model_config(n_ctx, n_gpu_layers, **kwargs)
     return _LoadPlan(
         resolved_name=resolved_name,
         model_path=model_path,
@@ -541,7 +522,6 @@ def _prepare_load(
 
 def _create_llm_handle(plan: _LoadPlan) -> UniRTLLM:
     input_value = unirt_LlmCreateInput(
-        model_name=plan.resolved_name.encode('utf-8'),
         model_path=plan.model_path.encode('utf-8'),
         tokenizer_path=(
             plan.tokenizer_path.encode('utf-8') if plan.tokenizer_path else None
@@ -566,7 +546,6 @@ def _create_vlm_handle(
     meta: dict | None = None,
 ) -> UniRTVLM:
     input_value = unirt_VlmCreateInput(
-        model_name=resolved_name.encode('utf-8'),
         model_path=model_path.encode('utf-8'),
         mmproj_path=mmproj_path.encode('utf-8') if mmproj_path else None,
         config=config,
@@ -826,7 +805,6 @@ class AutoModelForEmbedding:
         plugin_id, device_id = _resolve_embedding_device(device_map, resolved_name, model_path)
         resolved_max_length = _embedding_max_length(bundle_dir, resolved_tokenizer, max_length)
         input_value = unirt_EmbeddingCreateInput(
-            model_name=resolved_name.encode('utf-8'),
             model_path=model_path.encode('utf-8'),
             plugin_id=plugin_id.encode('utf-8'),
             device_id=device_id.encode('utf-8'),

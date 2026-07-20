@@ -44,8 +44,6 @@ __all__ = [
     'get_paths',
     'get_type',
     'set_type',
-    'resolve_alias',
-    'resolve_effective_hub',
     'ensure_cached',
 ]
 
@@ -853,7 +851,6 @@ def pull(
     hub: str | int = 'auto',
     local_path: str | None = None,
     hf_token: str | None = None,
-    display_name: str | None = None,
     model_type: str | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
@@ -863,7 +860,6 @@ def pull(
     raises a focused not-supported error.
     """
 
-    del display_name
     repo_id, wanted = _resolve_name(model_name, precision)
     hub_value = _resolve_hub(hub)
     if hub_value == UNIRT_HUB_LOCALFS and not local_path:
@@ -926,11 +922,9 @@ def query(
     hub: str | int = 'auto',
     local_path: str | None = None,
     hf_token: str | None = None,
-    display_name: str | None = None,
 ) -> ModelInspection:
     """Inspect available model variants without downloading model bytes."""
 
-    del display_name
     repo_id, precision = _resolve_name(model_name, None)
     hub_value = _resolve_hub(hub)
     if hub_value == UNIRT_HUB_LOCALFS:
@@ -973,23 +967,6 @@ def _resolve_hub(hub: str | int) -> int:
         'the local filesystem ("localfs") are available',
     )
     raise AssertionError('unreachable')
-
-
-def resolve_effective_hub(model_name: str, hub: str | int = 'auto') -> int:
-    """Resolve ``auto`` to Hugging Face; retained for caller compatibility."""
-
-    del model_name
-    value = _resolve_hub(hub)
-    return UNIRT_HUB_HUGGINGFACE if value == UNIRT_HUB_AUTO else value
-
-
-def resolve_alias(alias: str) -> str:
-    """Expand a built-in short model alias."""
-
-    try:
-        return _ALIASES[alias.lower()]
-    except KeyError:
-        _raise(UNIRT_ERROR_COMMON_HUB_MODEL_NOT_FOUND, f'unknown model alias: {alias!r}')
 
 
 def list_models() -> list[str]:
