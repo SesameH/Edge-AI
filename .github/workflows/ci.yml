@@ -174,9 +174,13 @@ jobs:
           print(next(dev['udid'] for devices in data['devices'].values()
                      for dev in devices if dev['isAvailable']))")
           xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b   # wait until launchd_sim is ready
           echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
       - name: Run native tests inside the simulator
         run: |
+          ls -la build-ios/unirt-*-test
+          file build-ios/unirt-inference-smoke-test
+          codesign -s - -f build-ios/unirt-static-registration-test build-ios/unirt-inference-smoke-test
           xcrun simctl spawn "$SIM_UDID" "$PWD/build-ios/unirt-static-registration-test"
           xcrun simctl spawn "$SIM_UDID" "$PWD/build-ios/unirt-inference-smoke-test" \
             "$PWD/models/SmolLM2-135M-Instruct-Q8_0.gguf"
