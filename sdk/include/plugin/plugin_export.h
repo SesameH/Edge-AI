@@ -48,17 +48,37 @@ struct Holder {
     std::unique_ptr<Impl> impl;
 };
 
-// One thunk shape fits every table entry: unwrap self, forward, catch.
-#define UNIRT_PLUGIN_THUNK(holder_t, method)                                            \
-    [](void* self, auto*... args) noexcept -> int32_t {                                 \
-        try {                                                                           \
-            return static_cast<holder_t*>(self)->impl->method(args...);                 \
-        } catch (...) {                                                                 \
-            return ::unirt::plugin_export::current_exception_code();                    \
-        }                                                                               \
+}  // namespace detail
+
+// Thunks per arity: unwrap self, forward, catch. Spelled out explicitly —
+// a variadic generic lambda here ICEs MSVC, and the plugin boundary is the
+// one place where boring code beats clever code.
+#define UNIRT_PLUGIN_THUNK_0(holder_t, method)                          \
+    [](void* self) noexcept -> int32_t {                                \
+        try {                                                           \
+            return static_cast<holder_t*>(self)->impl->method();        \
+        } catch (...) {                                                 \
+            return ::unirt::plugin_export::current_exception_code();    \
+        }                                                               \
     }
 
-}  // namespace detail
+#define UNIRT_PLUGIN_THUNK_1(holder_t, method, A1)                      \
+    [](void* self, A1 a1) noexcept -> int32_t {                         \
+        try {                                                           \
+            return static_cast<holder_t*>(self)->impl->method(a1);      \
+        } catch (...) {                                                 \
+            return ::unirt::plugin_export::current_exception_code();    \
+        }                                                               \
+    }
+
+#define UNIRT_PLUGIN_THUNK_2(holder_t, method, A1, A2)                  \
+    [](void* self, A1 a1, A2 a2) noexcept -> int32_t {                  \
+        try {                                                           \
+            return static_cast<holder_t*>(self)->impl->method(a1, a2);  \
+        } catch (...) {                                                 \
+            return ::unirt::plugin_export::current_exception_code();    \
+        }                                                               \
+    }
 
 inline unirt_LlmTable* wrap(std::unique_ptr<LlmBackend> impl) noexcept {
     using Holder = detail::Holder<unirt_LlmTable, LlmBackend>;
@@ -70,20 +90,19 @@ inline unirt_LlmTable* wrap(std::unique_ptr<LlmBackend> impl) noexcept {
     unirt_LlmTable& t        = holder->table;
     t.struct_size            = sizeof(unirt_LlmTable);
     t.self                   = holder;
-    t.create                 = UNIRT_PLUGIN_THUNK(Holder, create);
-    t.reset                  = [](void* self) noexcept -> int32_t {
-        try {
-            return static_cast<Holder*>(self)->impl->reset();
-        } catch (...) {
-            return current_exception_code();
-        }
-    };
-    t.save_kv_cache          = UNIRT_PLUGIN_THUNK(Holder, save_kv_cache);
-    t.load_kv_cache          = UNIRT_PLUGIN_THUNK(Holder, load_kv_cache);
-    t.apply_chat_template    = UNIRT_PLUGIN_THUNK(Holder, apply_chat_template);
-    t.generate               = UNIRT_PLUGIN_THUNK(Holder, generate);
-    t.get_model_info         = UNIRT_PLUGIN_THUNK(Holder, get_model_info);
-    t.get_runtime_stats      = UNIRT_PLUGIN_THUNK(Holder, get_runtime_stats);
+    t.create                 = UNIRT_PLUGIN_THUNK_1(Holder, create, const unirt_LlmCreateInput*);
+    t.reset                  = UNIRT_PLUGIN_THUNK_0(Holder, reset);
+    t.save_kv_cache          = UNIRT_PLUGIN_THUNK_2(
+        Holder, save_kv_cache, const unirt_KvCacheSaveInput*, unirt_KvCacheSaveOutput*);
+    t.load_kv_cache          = UNIRT_PLUGIN_THUNK_2(
+        Holder, load_kv_cache, const unirt_KvCacheLoadInput*, unirt_KvCacheLoadOutput*);
+    t.apply_chat_template    = UNIRT_PLUGIN_THUNK_2(
+        Holder, apply_chat_template, const unirt_LlmApplyChatTemplateInput*,
+        unirt_LlmApplyChatTemplateOutput*);
+    t.generate               = UNIRT_PLUGIN_THUNK_2(
+        Holder, generate, const unirt_LlmGenerateInput*, unirt_LlmGenerateOutput*);
+    t.get_model_info         = UNIRT_PLUGIN_THUNK_1(Holder, get_model_info, unirt_LlmModelInfo*);
+    t.get_runtime_stats      = UNIRT_PLUGIN_THUNK_1(Holder, get_runtime_stats, unirt_LlmRuntimeStats*);
     t.destroy                = [](void* self) noexcept { delete static_cast<Holder*>(self); };
     return &t;
 }
@@ -98,17 +117,14 @@ inline unirt_VlmTable* wrap(std::unique_ptr<VlmBackend> impl) noexcept {
     unirt_VlmTable& t     = holder->table;
     t.struct_size         = sizeof(unirt_VlmTable);
     t.self                = holder;
-    t.create              = UNIRT_PLUGIN_THUNK(Holder, create);
-    t.reset               = [](void* self) noexcept -> int32_t {
-        try {
-            return static_cast<Holder*>(self)->impl->reset();
-        } catch (...) {
-            return current_exception_code();
-        }
-    };
-    t.apply_chat_template = UNIRT_PLUGIN_THUNK(Holder, apply_chat_template);
-    t.generate            = UNIRT_PLUGIN_THUNK(Holder, generate);
-    t.get_capabilities    = UNIRT_PLUGIN_THUNK(Holder, get_capabilities);
+    t.create              = UNIRT_PLUGIN_THUNK_1(Holder, create, const unirt_VlmCreateInput*);
+    t.reset               = UNIRT_PLUGIN_THUNK_0(Holder, reset);
+    t.apply_chat_template = UNIRT_PLUGIN_THUNK_2(
+        Holder, apply_chat_template, const unirt_VlmApplyChatTemplateInput*,
+        unirt_VlmApplyChatTemplateOutput*);
+    t.generate            = UNIRT_PLUGIN_THUNK_2(
+        Holder, generate, const unirt_VlmGenerateInput*, unirt_VlmGenerateOutput*);
+    t.get_capabilities    = UNIRT_PLUGIN_THUNK_1(Holder, get_capabilities, unirt_VlmCapabilities*);
     t.destroy             = [](void* self) noexcept { delete static_cast<Holder*>(self); };
     return &t;
 }
@@ -123,9 +139,11 @@ inline unirt_EmbeddingTable* wrap(std::unique_ptr<EmbeddingBackend> impl) noexce
     unirt_EmbeddingTable& t = holder->table;
     t.struct_size           = sizeof(unirt_EmbeddingTable);
     t.self                  = holder;
-    t.create                = UNIRT_PLUGIN_THUNK(Holder, create);
-    t.encode                = UNIRT_PLUGIN_THUNK(Holder, encode);
-    t.get_runtime_stats     = UNIRT_PLUGIN_THUNK(Holder, get_runtime_stats);
+    t.create                = UNIRT_PLUGIN_THUNK_1(Holder, create, const unirt_EmbeddingCreateInput*);
+    t.encode                = UNIRT_PLUGIN_THUNK_2(
+        Holder, encode, const unirt_EmbeddingEncodeInput*, unirt_EmbeddingEncodeOutput*);
+    t.get_runtime_stats     = UNIRT_PLUGIN_THUNK_1(
+        Holder, get_runtime_stats, unirt_EmbeddingRuntimeStats*);
     t.destroy               = [](void* self) noexcept { delete static_cast<Holder*>(self); };
     return &t;
 }
@@ -147,7 +165,8 @@ inline unirt_PluginTable* wrap(std::unique_ptr<BackendPackage> impl) noexcept {
             return "unknown";
         }
     };
-    t.get_device_list  = UNIRT_PLUGIN_THUNK(Holder, get_device_list);
+    t.get_device_list  = UNIRT_PLUGIN_THUNK_2(
+        Holder, get_device_list, const unirt_GetDeviceListInput*, unirt_GetDeviceListOutput*);
     t.create_llm       = [](void* self) noexcept -> unirt_LlmTable* {
         try {
             return wrap(std::unique_ptr<LlmBackend>(static_cast<Holder*>(self)->impl->create_llm()));
@@ -179,7 +198,9 @@ inline unirt_PluginTable* wrap(std::unique_ptr<BackendPackage> impl) noexcept {
     return &t;
 }
 
-#undef UNIRT_PLUGIN_THUNK
+#undef UNIRT_PLUGIN_THUNK_0
+#undef UNIRT_PLUGIN_THUNK_1
+#undef UNIRT_PLUGIN_THUNK_2
 
 /** One-liner for unirt_plugin_open(): construct the package and wrap it. */
 template <typename Package, typename... Args>

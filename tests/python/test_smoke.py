@@ -18,10 +18,15 @@ class TestCore:
     def test_both_runtimes_load(self, sdk):
         runtimes = sdk.get_runtime_list()
         assert 'llama_cpp' in runtimes
-        assert 'mlx' in runtimes
+        if 'mlx' not in runtimes:
+            import pytest
+            pytest.skip('MLX plugin is not built in this configuration')
 
     def test_device_lists(self, sdk):
-        mlx_devices = sdk.get_compute_unit_list('mlx')
+        mlx_devices = (
+            sdk.get_compute_unit_list('mlx')
+            if 'mlx' in sdk.get_runtime_list() else []
+        )
         assert len(mlx_devices) <= 1
         if mlx_devices:
             assert mlx_devices[0][0] == 'mlx0'
@@ -122,8 +127,9 @@ class TestMlx:
     def test_quantized_model(self, sdk):
         from unirt.auto import AutoModelForCausalLM
 
-        if not sdk.get_compute_unit_list('mlx'):
-            pytest.skip('MLX plugin is present but no usable Metal device is available')
+        from conftest import require_mlx
+
+        require_mlx(sdk)
 
         m = AutoModelForCausalLM.from_pretrained(model_path('safetensors_8bit'), device_map='mlx')
         try:

@@ -45,10 +45,17 @@ def llama_model(sdk):
     m.close()
 
 
-@pytest.fixture(scope='session')
-def mlx_model(sdk):
+def require_mlx(sdk):
+    """Skip unless the MLX plugin is built AND a Metal device is usable."""
+    if 'mlx' not in sdk.get_runtime_list():
+        pytest.skip('MLX plugin is not built in this configuration')
     if not sdk.get_compute_unit_list('mlx'):
         pytest.skip('MLX plugin is present but no usable Metal device is available')
+
+
+@pytest.fixture(scope='session')
+def mlx_model(sdk):
+    require_mlx(sdk)
     m = _load(model_path('safetensors'), 'mlx')
     yield m
     m.close()

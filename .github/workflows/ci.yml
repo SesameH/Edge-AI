@@ -54,17 +54,27 @@ jobs:
         include:
           - os: windows-latest
             label: Windows x64
+            # Default Visual Studio generator.
+            cmake_flags: ''
           - os: windows-11-arm
             label: Windows arm64
+            # llama.cpp refuses MSVC on ARM; use its clang toolchain file,
+            # the same recipe as llama.cpp's own Windows ARM64 releases.
+            cmake_flags: >-
+              -G "Ninja Multi-Config"
+              -DCMAKE_TOOLCHAIN_FILE=$env:GITHUB_WORKSPACE/third-party/llama.cpp/cmake/arm64-windows-llvm.cmake
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Fetch llama.cpp submodule
         run: git submodule update --init --depth 1 third-party/llama.cpp
+      - name: Install ninja (arm64)
+        if: matrix.os == 'windows-11-arm'
+        run: choco install ninja -y
       - name: Configure
         run: >
-          cmake -S sdk -B build
+          cmake -S sdk -B build ${{ matrix.cmake_flags }}
           -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
       - name: Build
         run: cmake --build build --config Release -j 4
