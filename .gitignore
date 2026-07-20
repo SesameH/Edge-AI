@@ -1,0 +1,32 @@
+# Build output (all generated; never edit by hand)
+build/
+build-*/
+cmake-build-*/
+sdk/pkg-unirt/
+target/
+compile_commands.json
+
+# Test models (downloaded per README; hundreds of MB)
+models/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+dist/
+*.egg-info/
+wheelhouse/
+
+# Editors & OS
+.DS_Store
+.idea/
+.vscode/
+
+# Local-only settings and secrets (HF tokens etc.)
+.claude/settings.local.json
+.env

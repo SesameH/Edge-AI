@@ -1,0 +1,6 @@
+[submodule "third-party/llama.cpp"]
+	path = third-party/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp
+[submodule "third-party/mlx"]
+	path = third-party/mlx
+	url = https://github.com/ml-explore/mlx

@@ -1,0 +1,52 @@
+# Third-Party Notices
+
+UniRT is original software copyright (c) 2026 Peter Huang and is distributed
+under the BSD 3-Clause License in `LICENSE`.
+
+The project uses the following independently maintained third-party software.
+These components retain their own copyright notices and licenses.
+
+## llama.cpp
+
+- Location: `third-party/llama.cpp`
+- Project: https://github.com/ggml-org/llama.cpp
+- License: MIT
+- Copyright: the llama.cpp and ggml contributors
+
+## MLX
+
+- Location: `third-party/mlx`
+- Project: https://github.com/ml-explore/mlx
+- License: MIT
+- Copyright: Apple Inc. and MLX contributors
+
+## ONNX Runtime
+
+- Location: external SDK selected by `UNIRT_ONNXRUNTIME_ROOT`
+- Project: https://github.com/microsoft/onnxruntime
+- License: MIT
+- Copyright: Microsoft Corporation and ONNX Runtime contributors
+
+## {fmt}
+
+- Location: `sdk/include/external/fmt`
+- Project: https://github.com/fmtlib/fmt
+- License: MIT
+- Copyright: Victor Zverovich and {fmt} contributors
+
+## JSON for Modern C++
+
+- Location: `sdk/plugins/mlx/src/vendor/json.hpp`
+- Project: https://github.com/nlohmann/json
+- License: MIT
+- Copyright: Niels Lohmann and contributors
+
+## Python runtime dependencies
+
+The Python package declares `huggingface_hub`, `tokenizers`, and `tqdm` as
+external dependencies. They are installed separately and are not copied into
+this repository. Their respective package distributions provide their license
+texts and notices.
+
+Model files are not part of the UniRT source license. Each downloaded or local
+model remains subject to the license supplied by its model publisher.
