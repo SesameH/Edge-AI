@@ -142,15 +142,19 @@ python3 -c "from unirt._ffi import _api; _api.init(); print(_api.get_runtime_lis
 python3 examples/chat.py \
     --backend llama_cpp --model models/SmolLM2-135M-Instruct-Q8_0.gguf
 
-# or pass a Hugging Face repository directly; only Q4_K_M is downloaded
+# or load from Python; unirt.load() detects the model kind (llm / vlm /
+# embedding) and accepts local paths or Hugging Face repository ids
 PYTHONPATH=$PWD/bindings/python python3 - <<'PY'
-from unirt import AutoModelForCausalLM
-model = AutoModelForCausalLM.from_pretrained(
-    'bartowski/SmolLM2-135M-Instruct-GGUF', precision='Q4_K_M')
+import unirt
+model = unirt.load('bartowski/SmolLM2-135M-Instruct-GGUF', precision='Q4_K_M')
 print(model)
 model.close()
 PY
 ```
+
+Porting from `transformers`? The HF-style entry points
+(`AutoModelForCausalLM` / `AutoModelForVision2Seq` / `AutoModelForEmbedding`
+with `from_pretrained`) are first-class aliases of `unirt.load`.
 
 Text embeddings use the same cache and download only the selected ONNX graph
 plus tokenizer/config sidecars:

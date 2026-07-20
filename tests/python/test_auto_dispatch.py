@@ -115,3 +115,45 @@ def test_dispatch_strings_reject_embedded_nul():
         auto.resolve_device_map('mlx\x00cpu')
     with pytest.raises(ValueError, match='NUL-free'):
         auto._resolve_model_sources('model\x00path', None, None, None)
+
+
+def test_load_kind_validation():
+    with pytest.raises(TypeError, match='kind must be a string'):
+        auto.load('x', kind=3)
+    with pytest.raises(ValueError, match='kind must be one of'):
+        auto.load('x', kind='audio')
+
+
+def test_load_routes_by_kind(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        auto.AutoModelForCausalLM, 'from_pretrained',
+        classmethod(lambda cls, src, **kw: calls.append(('llm', src, kw)) or 'L'),
+    )
+    monkeypatch.setattr(
+        auto.AutoModelForVision2Seq, 'from_pretrained',
+        classmethod(lambda cls, src, **kw: calls.append(('vlm', src, kw)) or 'V'),
+    )
+    monkeypatch.setattr(
+        auto.AutoModelForEmbedding, 'from_pretrained',
+        classmethod(lambda cls, src, **kw: calls.append(('emb', src, kw)) or 'E'),
+    )
+
+    assert auto.load('m', kind='llm', device_map='cpu') == 'L'
+    assert auto.load('m', kind='VLM') == 'V'
+    assert auto.load('m', kind='embedding') == 'E'
+    assert calls[0] == ('llm', 'm', {'device_map': 'cpu'})
+
+    # auto: an ONNX / sentence-transformers bundle is an embedding model
+    (tmp_path / 'model.onnx').write_bytes(b'x')
+    assert auto.load(str(tmp_path)) == 'E'
+    gguf_dir = tmp_path / 'g'
+    gguf_dir.mkdir()
+    (gguf_dir / 'weights-Q8_0.gguf').write_bytes(b'x')
+    (gguf_dir / 'sentence_bert_config.json').write_text('{}')
+    assert auto.load(str(gguf_dir)) == 'E'
+    # auto: a plain GGUF loads as a language model
+    llm_dir = tmp_path / 'l'
+    llm_dir.mkdir()
+    (llm_dir / 'weights-Q8_0.gguf').write_bytes(b'x')
+    assert auto.load(str(llm_dir)) == 'L'

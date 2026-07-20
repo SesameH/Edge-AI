@@ -905,9 +905,50 @@ class AutoModelForVision2Seq:
         return _create_vlm_from_plan(plan)
 
 
+def _infer_model_kind(model_name_or_path: str) -> str:
+    """Best-effort local sniff: embedding bundles carry an ONNX graph or a
+    sentence-transformers config; everything else loads as a language model
+    (which auto-upgrades to a VLM when a projector is present)."""
+    absolute = os.path.abspath(model_name_or_path)
+    directory = absolute if os.path.isdir(absolute) else os.path.dirname(absolute)
+    names = {name.lower() for name in _files_in(directory)}
+    if any(name.endswith('.onnx') for name in names) or 'sentence_bert_config.json' in names:
+        return 'embedding'
+    return 'llm'
+
+
+def load(
+    model_name_or_path: str,
+    *,
+    kind: str = 'auto',
+    **kwargs,
+):
+    """UniRT's native entry point: load any supported model in one call.
+
+    ``kind`` selects the modality — ``"llm"``, ``"vlm"``, ``"embedding"``,
+    or ``"auto"`` (default) to detect it from the model files. Keyword
+    arguments are forwarded to the matching ``from_pretrained``. The
+    HF-style ``AutoModelFor*`` classes remain available as aliases for
+    callers porting code from transformers.
+    """
+    if not isinstance(kind, str):
+        raise TypeError('kind must be a string')
+    normalized = kind.strip().casefold()
+    if normalized not in {'auto', 'llm', 'vlm', 'embedding'}:
+        raise ValueError("kind must be one of: auto, llm, vlm, embedding")
+    if normalized == 'auto':
+        normalized = _infer_model_kind(model_name_or_path)
+    if normalized == 'embedding':
+        return AutoModelForEmbedding.from_pretrained(model_name_or_path, **kwargs)
+    if normalized == 'vlm':
+        return AutoModelForVision2Seq.from_pretrained(model_name_or_path, **kwargs)
+    return AutoModelForCausalLM.from_pretrained(model_name_or_path, **kwargs)
+
+
 __all__ = [
     'AutoModelForCausalLM',
     'AutoModelForEmbedding',
     'AutoModelForVision2Seq',
+    'load',
     'resolve_device_map',
 ]

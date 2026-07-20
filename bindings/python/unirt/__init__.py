@@ -19,6 +19,7 @@ from .auto import (
     AutoModelForCausalLM,
     AutoModelForEmbedding,
     AutoModelForVision2Seq,
+    load,
     resolve_device_map,
 )
 from .generation import GenerateOutput, GenerationProfile, TextIteratorStreamer
@@ -41,6 +42,7 @@ __all__ = [
     'get_plugin_version',
     'get_runtime_list',
     'init',
+    'load',
     'model_manager',
     'resolve_device_map',
     'set_log_level',
