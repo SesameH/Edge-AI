@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GGUF_URL: https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
+
+jobs:
+  macos:
+    name: macOS arm64 (llama_cpp)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch llama.cpp submodule
+        run: git submodule update --init --depth 1 third-party/llama.cpp
+      - name: Configure
+        run: >
+          cmake -S sdk -B build -DCMAKE_BUILD_TYPE=Release
+          -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
+      - name: Build
+        run: cmake --build build -j4
+      - name: Install
+        run: cmake --install build --prefix sdk/pkg-unirt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cache test model
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: models/SmolLM2-135M-Instruct-Q8_0.gguf
+          key: smollm2-135m-q8_0
+      - name: Download test model
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p models
+          curl -fL -o models/SmolLM2-135M-Instruct-Q8_0.gguf "$GGUF_URL"
+      - name: Install Python binding
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e bindings/python pytest
+      - name: Run tests
+        run: python -m pytest tests/python -q
+
+  windows:
+    name: ${{ matrix.label }} (llama_cpp)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows x64
+          - os: windows-11-arm
+            label: Windows arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch llama.cpp submodule
+        run: git submodule update --init --depth 1 third-party/llama.cpp
+      - name: Configure
+        run: >
+          cmake -S sdk -B build
+          -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
+      - name: Build
+        run: cmake --build build --config Release -j 4
+      - name: Install
+        run: cmake --install build --config Release --prefix sdk/pkg-unirt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cache test model
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: models/SmolLM2-135M-Instruct-Q8_0.gguf
+          key: smollm2-135m-q8_0
+      - name: Download test model
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p models
+          curl -fL -o models/SmolLM2-135M-Instruct-Q8_0.gguf "$GGUF_URL"
+      - name: Install Python binding
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e bindings/python pytest
+      - name: Run tests
+        run: python -m pytest tests/python -q
