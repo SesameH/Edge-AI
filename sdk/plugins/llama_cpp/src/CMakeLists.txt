@@ -1,6 +1,11 @@
-add_library(unirt_llama_cpp SHARED plugin.cpp llm.cpp vlm.cpp embedding.cpp)
-
-target_compile_definitions(unirt_llama_cpp PUBLIC UNIRT_SHARED)
+if(UNIRT_BUILD_SHARED)
+    add_library(unirt_llama_cpp SHARED plugin.cpp llm.cpp vlm.cpp embedding.cpp)
+    target_compile_definitions(unirt_llama_cpp PUBLIC UNIRT_SHARED)
+else()
+    # Static plugin: the app links it and calls
+    # unirt_register_plugin(unirt_plugin_id, unirt_plugin_open).
+    add_library(unirt_llama_cpp STATIC plugin.cpp llm.cpp vlm.cpp embedding.cpp)
+endif()
 
 target_include_directories(unirt_llama_cpp PUBLIC ${COMMON_INCLUDE})
 
@@ -8,7 +13,9 @@ target_link_libraries(unirt_llama_cpp
     PUBLIC  llama mtmd
     PRIVATE unirt)
 
-if(ANDROID)
+if(NOT UNIRT_BUILD_SHARED)
+    # Static archives keep the target name; discovery naming is irrelevant.
+elseif(ANDROID)
     # Android packs every .so flat into the app's lib dir; the registry
     # discovers flat plugins by the libunirt_plugin_<id>.so naming.
     set_target_properties(unirt_llama_cpp PROPERTIES

@@ -1,10 +1,16 @@
 file(GLOB BRIDGE_SRC *.cpp)
 
-add_library(unirt SHARED ${BRIDGE_SRC})
+if(UNIRT_BUILD_SHARED)
+    add_library(unirt SHARED ${BRIDGE_SRC})
+    target_compile_definitions(unirt PRIVATE UNIRT_SHARED UNIRT_BUILD)
+else()
+    # Static build (iOS forbids dlopen; embedders link one binary and use
+    # unirt_register_plugin instead of the directory scan).
+    add_library(unirt STATIC ${BRIDGE_SRC})
+endif()
 
 set_source_files_properties(version.cpp PROPERTIES
     COMPILE_DEFINITIONS UNIRT_VERSION="${UNIRT_VERSION}")
-target_compile_definitions(unirt PRIVATE UNIRT_SHARED UNIRT_BUILD)
 
 target_include_directories(unirt PUBLIC ${COMMON_INCLUDE})
 

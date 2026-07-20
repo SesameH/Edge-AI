@@ -60,6 +60,10 @@ class PluginSlot {
      *  Throws std::runtime_error with a reason on any failure. */
     static PluginSlot from_library(const std::filesystem::path& path);
 
+    /** Wrap a statically linked plugin's entry points (unirt_register_plugin).
+     *  The ABI stamp is the linker's problem here: one binary, one contract. */
+    static PluginSlot from_functions(IdentityFn identity, FactoryFn factory);
+
     const std::string& id() const noexcept { return id_; }
 
     /** The package, opened on first use: calls the factory, validates the
@@ -91,6 +95,9 @@ class PluginDirectory {
     /** Scan the plugin root (UNIRT_PLUGIN_PATH or the directory holding
      *  libunirt) for `<subdir>/<platform plugin name>` and load each. */
     void discover();
+
+    /** Register an in-process (statically linked) backend. */
+    void adopt(PluginSlot::IdentityFn identity, PluginSlot::FactoryFn factory);
 
     /** Destroy every plugin instance and unload their libraries. */
     void unload_all();

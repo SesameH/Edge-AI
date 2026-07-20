@@ -141,6 +141,17 @@ PluginSlot PluginSlot::from_library(const std::filesystem::path& path) {
     return slot;
 }
 
+PluginSlot PluginSlot::from_functions(IdentityFn identity, FactoryFn factory) {
+    if (!identity || !factory) throw std::runtime_error("null plugin registration functions");
+    const char* id = identity();
+    if (!id || !id[0]) throw std::runtime_error("unirt_plugin_id() returned an empty id");
+
+    PluginSlot slot;
+    slot.id_      = id;
+    slot.factory_ = factory;
+    return slot;
+}
+
 BackendPackage& PluginSlot::instance() {
     if (!plugin_) {
         unirt_PluginTable* table = factory_ ? factory_() : nullptr;
@@ -220,6 +231,15 @@ void PluginDirectory::discover() {
         }
     }
     UNIRT_LOG_TRACE("plugin scan complete: {} loaded, {} rejected", slots_.size(), broken_.size());
+}
+
+void PluginDirectory::adopt(PluginSlot::IdentityFn identity, PluginSlot::FactoryFn factory) {
+    PluginSlot slot = PluginSlot::from_functions(identity, factory);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string                 id = slot.id();
+    UNIRT_LOG_TRACE("adopting statically linked plugin '{}'", id);
+    slots_.insert_or_assign(std::move(id), std::move(slot));
 }
 
 void PluginDirectory::unload_all() {

@@ -125,6 +125,19 @@ int32_t unirt_deinit(void) {
     });
 }
 
+int32_t unirt_register_plugin(unirt_plugin_id_func identity, unirt_plugin_open_func open_plugin) {
+    UNIRT_LOG_DEBUG("registering statically linked plugin");
+    if (!identity || !open_plugin) {
+        return bridge::fail(
+            UNIRT_ERROR_COMMON_INVALID_INPUT, "register_plugin: identity/open function is NULL");
+    }
+
+    return bridge::shielded("runtime.register_plugin", UNIRT_ERROR_COMMON_PLUGIN_INVALID, [&]() -> int32_t {
+        PluginDirectory::instance().adopt(identity, open_plugin);
+        return UNIRT_SUCCESS;
+    });
+}
+
 int32_t unirt_set_log(unirt_log_callback callback) {
     unirt_log.store(callback ? callback : stderr_log_sink, std::memory_order_release);
     return UNIRT_SUCCESS;

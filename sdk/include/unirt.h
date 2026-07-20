@@ -173,6 +173,31 @@ typedef bool (*unirt_token_callback)(const char* token, void* user_data);
 /*  Runtime lifecycle                                                         */
 /* ========================================================================== */
 
+/** The C plugin table, defined in plugin/plugin_abi.h. Only plugins and
+ *  embedders that statically link a backend ever name this type. */
+typedef struct unirt_PluginTable unirt_PluginTable;
+
+/** The two entry points a plugin exports, as function pointers, for
+ *  platforms where shared libraries cannot be scanned (iOS forbids dlopen
+ *  of arbitrary paths; some embedders prefer one static binary). */
+typedef unirt_PluginId (*unirt_plugin_id_func)(void);
+typedef unirt_PluginTable* (*unirt_plugin_open_func)(void);
+
+/**
+ * @brief Register a statically linked backend, bypassing the shared-library
+ *        scan. May be called before or after unirt_init(); the backend joins
+ *        any dynamically discovered plugins under the id it reports.
+ *
+ * @param identity[in]:    The plugin's unirt_plugin_id function.
+ * @param open_plugin[in]: The plugin's unirt_plugin_open function.
+ *
+ * @return UNIRT_SUCCESS on success, negative on failure.
+ *
+ * @thread_safety: Thread-safe.
+ */
+UNIRT_API int32_t unirt_register_plugin(
+    unirt_plugin_id_func identity, unirt_plugin_open_func open_plugin);
+
 /**
  * @brief Bring up the runtime: scan the plugin directory and prepare the
  *        registry. Call once before any other API except unirt_set_log().

@@ -35,6 +35,7 @@ set(UNIRT_VERSION "v0.0.0" CACHE STRING "UniRT library version")
 # Build Options
 # ===============================================================================
 
+option(UNIRT_BUILD_SHARED      "Build libunirt and plugins as shared libraries" ON)
 option(UNIRT_PLUGIN_LLAMA_CPP  "Enable llama.cpp backend"       ON)
 option(UNIRT_PLUGIN_MLX        "Enable MLX backend (Apple)"     ON)
 option(UNIRT_PLUGIN_ONNXRUNTIME "Enable ONNX Runtime embedding backend" ON)
@@ -97,6 +98,18 @@ if(UNIRT_NATIVE_TESTS AND UNIRT_PLUGIN_MLX)
         COMMAND unirt-mlx-tokenizer-test
                 "${CMAKE_CURRENT_SOURCE_DIR}/../models/SmolLM2-135M-Instruct/tokenizer.json")
     set_tests_properties(unirt-mlx-tokenizer PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+if(UNIRT_NATIVE_TESTS)
+    add_executable(
+        unirt-static-registration-test
+        "${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/test_static_registration.cpp")
+    target_include_directories(unirt-static-registration-test PRIVATE ${COMMON_INCLUDE})
+    target_link_libraries(unirt-static-registration-test PRIVATE unirt)
+    if(UNIRT_BUILD_SHARED)
+        target_compile_definitions(unirt-static-registration-test PRIVATE UNIRT_SHARED)
+    endif()
+    add_test(NAME unirt-static-registration COMMAND unirt-static-registration-test)
 endif()
 
 if(UNIRT_PYTHON_TESTS)
