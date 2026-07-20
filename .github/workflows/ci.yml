@@ -107,11 +107,15 @@ jobs:
             # may install an x64 LLVM whose default is x86_64, which compiled
             # the generic ggml sources for the wrong arch (duplicate symbols
             # against the arm-specific sources at link time).
+            # Overriding CMAKE_<LANG>_FLAGS replaces the toolchain's
+            # *_FLAGS_INIT, so restate its -march too: without it the build
+            # falls back to baseline armv8.0 and inference crawls (no
+            # dotprod/fp16 kernels).
             cmake_flags: >-
               -G "Ninja Multi-Config"
               -DCMAKE_TOOLCHAIN_FILE=../third-party/llama.cpp/cmake/arm64-windows-llvm.cmake
-              -DCMAKE_C_FLAGS=--target=arm64-pc-windows-msvc
-              -DCMAKE_CXX_FLAGS=--target=arm64-pc-windows-msvc
+              "-DCMAKE_C_FLAGS=--target=arm64-pc-windows-msvc -march=armv8.7-a"
+              "-DCMAKE_CXX_FLAGS=--target=arm64-pc-windows-msvc -march=armv8.7-a"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
