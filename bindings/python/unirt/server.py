@@ -300,8 +300,21 @@ class Handler(BaseHTTPRequestHandler):
             })
         elif self.path == '/v1/stats':
             # Not an OpenAI-standard endpoint: exposes runtime_stats() for
-            # UIs/dashboards that want live device/memory info.
-            self._json(200, self.server.model.runtime_stats())
+            # UIs/dashboards that want live device/memory info. UniRTVLM
+            # has no runtime_stats() (no unirt_vlm_get_runtime_stats in the
+            # C ABI yet, unlike LLM/embedding) — report the same nulled-out
+            # shape rather than crashing, so /v1/stats is a stable surface
+            # regardless of which model kind is loaded.
+            if hasattr(self.server.model, 'runtime_stats'):
+                self._json(200, self.server.model.runtime_stats())
+            else:
+                self._json(200, {
+                    'model_bytes': -1,
+                    'kv_cache_bytes': -1,
+                    'device_peak_bytes': -1,
+                    'process_rss_bytes': -1,
+                    'device_name': None,
+                })
         elif self.path in ('/', '/health'):
             self._json(200, {'status': 'ok', 'model': model_id})
         else:

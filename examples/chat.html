@@ -165,6 +165,16 @@
     box-shadow: inset 0 1px 0 rgba(35,230,239,0.14), 0 8px 24px rgba(0,0,0,0.35);
   }
   .stat.offline { opacity: 0.45; }
+  /* While a request is generating, the server's model lock blocks
+     /v1/stats until it finishes — polling anyway would just hang, so
+     the row dims instead of looking frozen or broken. */
+  .stats.busy .stat { opacity: 0.35; filter: grayscale(0.4); transition: opacity .2s, filter .2s; }
+  .brand .dot.busy {
+    background: var(--violet);
+    box-shadow: 0 0 6px 1px var(--violet);
+    animation: pulse 1s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.35; } }
   .stat .label {
     font-family: var(--mono);
     font-size: 10px;
@@ -389,7 +399,7 @@
   </div>
 </header>
 
-<div class="stats">
+<div class="stats" id="statsRow">
   <div class="stat device">
     <div class="label">Device</div>
     <div class="value" id="statDevice">—</div>
@@ -577,6 +587,13 @@ async function send(text, images) {
   const { el: assistantEl, textNode } = addMessage('assistant', '');
   assistantEl.classList.add('pending');
 
+  // The server holds the model's lock for the whole generation, so
+  // /v1/stats would just hang if polled mid-request — stop polling and
+  // show "busy" instead of letting the row look frozen or broken.
+  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  $('statsRow').classList.add('busy');
+  dot.className = 'dot busy';
+
   $('sendBtn').disabled = true;
   try {
     const res = await fetch(base + '/v1/chat/completions', {
@@ -624,7 +641,9 @@ async function send(text, images) {
   } finally {
     assistantEl.classList.remove('pending');
     $('sendBtn').disabled = false;
+    $('statsRow').classList.remove('busy');
     refreshStats();
+    statsTimer = setInterval(refreshStats, 2000);
   }
 }
 

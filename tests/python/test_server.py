@@ -246,6 +246,36 @@ def test_stats_endpoint_exposes_runtime_stats():
         httpd.server_close()
 
 
+def test_stats_endpoint_reports_nulls_instead_of_crashing_without_runtime_stats():
+    """Regression: UniRTVLM has no runtime_stats() (no
+    unirt_vlm_get_runtime_stats in the C ABI yet) — GET /v1/stats used to
+    crash the connection with an AttributeError for VLM sessions."""
+    import http.client
+
+    class FakeModelWithoutStats:
+        pass
+
+    httpd = server.UniRTHTTPServer(('127.0.0.1', 0), FakeModelWithoutStats(), 'fake-vlm')
+    port = httpd.server_address[1]
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            connection.request('GET', '/v1/stats')
+            response = connection.getresponse()
+            body = json.loads(response.read())
+            assert response.status == 200
+            assert body['device_name'] is None
+            assert body['model_bytes'] == -1
+        finally:
+            connection.close()
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+
+
 def test_server_sheds_load_with_503_when_request_slots_exhausted():
     """Generation is serialized behind one lock; request_slots bounds the
     queue so a burst gets a fast 503 instead of piling up blocked threads."""
