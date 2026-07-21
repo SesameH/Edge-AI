@@ -18,24 +18,29 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root {
-    --bg: #0b0d12;
-    --panel: #12151c;
-    --panel-2: #161a23;
-    --border: #232838;
-    --text: #e6e8ee;
-    --muted: #8991a8;
-    --accent: #7c9eff;
-    --accent-2: #59e6c0;
-    --danger: #ff6b81;
-    --radius: 14px;
+    --bg: #05080a;
+    --panel: #070d10;
+    --panel-2: #0a1216;
+    --line: #123138;
+    --line-bright: #1d545f;
+    --text: #d6f3f5;
+    --muted: #5c8a90;
+    --cyan: #23e6ef;
+    --cyan-dim: #0f8890;
+    --danger: #ff5470;
+    --radius: 3px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
   html, body {
     height: 100%;
     margin: 0;
-    background: var(--bg);
+    background:
+      linear-gradient(rgba(18,49,56,0.35) 1px, transparent 1px) 0 0 / 100% 28px,
+      linear-gradient(90deg, rgba(18,49,56,0.35) 1px, transparent 1px) 0 0 / 28px 100%,
+      var(--bg);
     color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
   body {
     display: flex;
@@ -58,28 +63,31 @@
     gap: 10px;
   }
   .brand .dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
+    width: 8px;
+    height: 8px;
     background: var(--muted);
-    box-shadow: 0 0 0 3px rgba(124,158,255,0.08);
+    box-shadow: 0 0 0 1px rgba(92,138,144,0.4);
     transition: background .2s, box-shadow .2s;
   }
   .brand .dot.live {
-    background: var(--accent-2);
-    box-shadow: 0 0 0 4px rgba(89,230,192,0.15);
+    background: var(--cyan);
+    box-shadow: 0 0 6px 1px var(--cyan);
   }
   .brand .dot.error {
     background: var(--danger);
-    box-shadow: 0 0 0 4px rgba(255,107,129,0.15);
+    box-shadow: 0 0 6px 1px var(--danger);
   }
   h1 {
-    font-size: 17px;
+    font-family: var(--mono);
+    font-size: 16px;
     font-weight: 600;
     margin: 0;
-    letter-spacing: 0.2px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--cyan);
+    text-shadow: 0 0 10px rgba(35,230,239,0.35);
   }
-  h1 span { color: var(--muted); font-weight: 400; }
+  h1 span { color: var(--muted); font-weight: 400; text-shadow: none; }
 
   .endpoint {
     display: flex;
@@ -88,15 +96,15 @@
   }
   .endpoint input {
     background: var(--panel);
-    border: 1px solid var(--border);
+    border: 1px solid var(--line);
     color: var(--text);
-    border-radius: 8px;
+    border-radius: var(--radius);
     padding: 7px 10px;
     font-size: 12px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--mono);
     width: 220px;
   }
-  .endpoint input:focus { outline: 1px solid var(--accent); }
+  .endpoint input:focus { outline: none; border-color: var(--cyan); }
 
   .stats {
     display: grid;
@@ -105,44 +113,38 @@
     margin-bottom: 16px;
   }
   .stat {
-    background: linear-gradient(180deg, var(--panel-2), var(--panel));
-    border: 1px solid var(--border);
+    background: var(--panel);
+    border: 1px solid var(--line);
     border-radius: var(--radius);
     padding: 12px 14px;
-    position: relative;
-    overflow: hidden;
   }
-  .stat::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background: radial-gradient(120px 60px at 0% 0%, rgba(124,158,255,0.08), transparent);
-    pointer-events: none;
-  }
+  .stat.offline { opacity: 0.45; }
   .stat .label {
-    font-size: 10.5px;
+    font-family: var(--mono);
+    font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.1em;
     color: var(--muted);
     margin-bottom: 6px;
   }
   .stat .value {
-    font-size: 16px;
+    font-family: var(--mono);
+    font-size: 15px;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    color: var(--text);
   }
-  .stat.device .value { color: var(--accent-2); }
-  .stat.kv .value { color: var(--accent); }
+  .stat.device .value { color: var(--cyan); }
 
   main {
     flex: 1;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    border: 1px solid var(--border);
+    border: 1px solid var(--line);
     border-radius: var(--radius);
     background: var(--panel);
     overflow: hidden;
@@ -158,7 +160,7 @@
   .msg {
     max-width: 80%;
     padding: 10px 14px;
-    border-radius: 12px;
+    border-radius: var(--radius);
     line-height: 1.5;
     font-size: 14.5px;
     white-space: pre-wrap;
@@ -166,27 +168,27 @@
   }
   .msg.user {
     align-self: flex-end;
-    background: linear-gradient(135deg, #3a5bd9, #6c7bff);
-    color: white;
-    border-bottom-right-radius: 4px;
+    background: rgba(35,230,239,0.08);
+    border: 1px solid var(--line-bright);
+    color: var(--text);
   }
   .msg.assistant {
     align-self: flex-start;
     background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-bottom-left-radius: 4px;
+    border: 1px solid var(--line);
   }
   .msg.assistant.pending::after {
     content: "▍";
-    color: var(--accent);
+    color: var(--cyan);
     animation: blink 1s step-start infinite;
   }
   @keyframes blink { 50% { opacity: 0; } }
   .msg.system {
     align-self: center;
     color: var(--danger);
-    background: rgba(255,107,129,0.08);
-    border: 1px solid rgba(255,107,129,0.25);
+    background: rgba(255,84,112,0.08);
+    border: 1px solid rgba(255,84,112,0.35);
+    font-family: var(--mono);
     font-size: 13px;
   }
 
@@ -194,7 +196,7 @@
     display: flex;
     gap: 10px;
     padding: 14px;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--line);
     background: var(--panel-2);
   }
   textarea {
@@ -202,41 +204,47 @@
     resize: none;
     background: var(--bg);
     color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
     padding: 10px 12px;
     font-size: 14.5px;
     font-family: inherit;
     line-height: 1.4;
     max-height: 140px;
   }
-  textarea:focus { outline: 1px solid var(--accent); }
+  textarea:focus { outline: none; border-color: var(--cyan); }
   button {
-    border: none;
-    border-radius: 10px;
+    border: 1px solid var(--cyan);
+    border-radius: var(--radius);
     padding: 0 20px;
-    background: linear-gradient(135deg, var(--accent), #5a78e6);
-    color: white;
+    background: transparent;
+    color: var(--cyan);
+    font-family: var(--mono);
     font-weight: 600;
-    font-size: 14px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
     cursor: pointer;
-    transition: filter .15s, transform .05s;
+    transition: box-shadow .15s, background .15s;
   }
-  button:hover { filter: brightness(1.1); }
-  button:active { transform: scale(0.97); }
+  button:hover { box-shadow: 0 0 10px rgba(35,230,239,0.4); background: rgba(35,230,239,0.08); }
+  button:active { background: rgba(35,230,239,0.18); }
   button:disabled {
-    background: var(--panel);
+    border-color: var(--line);
     color: var(--muted);
     cursor: not-allowed;
+    box-shadow: none;
+    background: transparent;
   }
   footer {
     text-align: center;
     color: var(--muted);
-    font-size: 11.5px;
+    font-family: var(--mono);
+    font-size: 11px;
     padding: 10px 0 18px;
   }
   ::-webkit-scrollbar { width: 8px; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: var(--radius); }
 </style>
 </head>
 <body>
@@ -265,7 +273,7 @@
     <div class="label">KV cache</div>
     <div class="value" id="statKv">—</div>
   </div>
-  <div class="stat">
+  <div class="stat" id="statPeakCard">
     <div class="label">Device peak</div>
     <div class="value" id="statPeak">—</div>
   </div>
@@ -302,8 +310,11 @@ function addMessage(role, text) {
   return el;
 }
 
+// -1 means "this backend doesn't report it" (see unirt's runtime_stats:
+// llama_cpp has no GPU-peak API, mlx does via mx.get_peak_memory()) —
+// distinct from a real zero, so it gets its own label instead of a value.
 function fmtBytes(n) {
-  if (n === null || n === undefined || n < 0) return '—';
+  if (n === null || n === undefined || n < 0) return 'n/a';
   if (n === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
   let i = 0, v = n;
@@ -321,6 +332,7 @@ async function refreshStats() {
     $('statModel').textContent = fmtBytes(s.model_bytes);
     $('statKv').textContent = fmtBytes(s.kv_cache_bytes);
     $('statPeak').textContent = fmtBytes(s.device_peak_bytes);
+    $('statPeakCard').classList.toggle('offline', s.device_peak_bytes < 0);
     $('statRss').textContent = fmtBytes(s.process_rss_bytes);
     dot.className = 'dot live';
   } catch (e) {
