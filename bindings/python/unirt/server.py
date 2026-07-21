@@ -7,6 +7,7 @@
 
 Endpoints:
     GET  /v1/models
+    GET  /v1/stats              (runtime_stats(): memory/device usage; not OpenAI-standard)
     POST /v1/chat/completions   (supports "stream": true via SSE)
 """
 
@@ -297,6 +298,10 @@ class Handler(BaseHTTPRequestHandler):
                 'object': 'list',
                 'data': [{'id': model_id, 'object': 'model', 'owned_by': 'unirt'}],
             })
+        elif self.path == '/v1/stats':
+            # Not an OpenAI-standard endpoint: exposes runtime_stats() for
+            # UIs/dashboards that want live device/memory info.
+            self._json(200, self.server.model.runtime_stats())
         elif self.path in ('/', '/health'):
             self._json(200, {'status': 'ok', 'model': model_id})
         else:

@@ -40,6 +40,15 @@ class FakeModel:
         )
         return SimpleNamespace(text='ok', profile=profile)
 
+    def runtime_stats(self):
+        return {
+            'model_bytes': 123,
+            'kv_cache_bytes': 45,
+            'device_peak_bytes': 678,
+            'process_rss_bytes': 910,
+            'device_name': 'Fake GPU',
+        }
+
 
 def test_request_state_is_reset_even_after_success():
     model = FakeModel()
@@ -205,6 +214,30 @@ def test_cors_headers_for_browser_clients():
             listing.read()
             assert listing.status == 200
             assert listing.getheader('Access-Control-Allow-Origin') == '*'
+        finally:
+            connection.close()
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+
+
+def test_stats_endpoint_exposes_runtime_stats():
+    import http.client
+
+    httpd = server.UniRTHTTPServer(('127.0.0.1', 0), FakeModel(), 'fake-model')
+    port = httpd.server_address[1]
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            connection.request('GET', '/v1/stats')
+            response = connection.getresponse()
+            body = json.loads(response.read())
+            assert response.status == 200
+            assert body['device_name'] == 'Fake GPU'
+            assert body['model_bytes'] == 123
         finally:
             connection.close()
     finally:

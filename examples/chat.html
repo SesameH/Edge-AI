@@ -1,0 +1,434 @@
+<!-- Copyright (c) 2026 Peter Huang. -->
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<!--
+  Local test page for `python3 -m unirt.server`. Open this file directly in
+  a browser (or `python3 -m http.server` from this directory) — it's a
+  plain static page, no build step. It talks to the server's OpenAI-
+  compatible /v1/chat/completions (streaming via SSE) and the extra
+  /v1/stats endpoint for live memory/device readouts.
+
+  Run first:
+    python3 -m unirt.server --model <path> --backend llama_cpp --port 8080
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>UniRT — local chat</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #12151c;
+    --panel-2: #161a23;
+    --border: #232838;
+    --text: #e6e8ee;
+    --muted: #8991a8;
+    --accent: #7c9eff;
+    --accent-2: #59e6c0;
+    --danger: #ff6b81;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px 20px 0;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding-bottom: 14px;
+  }
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .brand .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--muted);
+    box-shadow: 0 0 0 3px rgba(124,158,255,0.08);
+    transition: background .2s, box-shadow .2s;
+  }
+  .brand .dot.live {
+    background: var(--accent-2);
+    box-shadow: 0 0 0 4px rgba(89,230,192,0.15);
+  }
+  .brand .dot.error {
+    background: var(--danger);
+    box-shadow: 0 0 0 4px rgba(255,107,129,0.15);
+  }
+  h1 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: 0.2px;
+  }
+  h1 span { color: var(--muted); font-weight: 400; }
+
+  .endpoint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .endpoint input {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    width: 220px;
+  }
+  .endpoint input:focus { outline: 1px solid var(--accent); }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .stat {
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    position: relative;
+    overflow: hidden;
+  }
+  .stat::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(120px 60px at 0% 0%, rgba(124,158,255,0.08), transparent);
+    pointer-events: none;
+  }
+  .stat .label {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .stat .value {
+    font-size: 16px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stat.device .value { color: var(--accent-2); }
+  .stat.kv .value { color: var(--accent); }
+
+  main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    overflow: hidden;
+  }
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .msg {
+    max-width: 80%;
+    padding: 10px 14px;
+    border-radius: 12px;
+    line-height: 1.5;
+    font-size: 14.5px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: linear-gradient(135deg, #3a5bd9, #6c7bff);
+    color: white;
+    border-bottom-right-radius: 4px;
+  }
+  .msg.assistant {
+    align-self: flex-start;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+  }
+  .msg.assistant.pending::after {
+    content: "▍";
+    color: var(--accent);
+    animation: blink 1s step-start infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .msg.system {
+    align-self: center;
+    color: var(--danger);
+    background: rgba(255,107,129,0.08);
+    border: 1px solid rgba(255,107,129,0.25);
+    font-size: 13px;
+  }
+
+  form {
+    display: flex;
+    gap: 10px;
+    padding: 14px;
+    border-top: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  textarea {
+    flex: 1;
+    resize: none;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 14.5px;
+    font-family: inherit;
+    line-height: 1.4;
+    max-height: 140px;
+  }
+  textarea:focus { outline: 1px solid var(--accent); }
+  button {
+    border: none;
+    border-radius: 10px;
+    padding: 0 20px;
+    background: linear-gradient(135deg, var(--accent), #5a78e6);
+    color: white;
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    transition: filter .15s, transform .05s;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:active { transform: scale(0.97); }
+  button:disabled {
+    background: var(--panel);
+    color: var(--muted);
+    cursor: not-allowed;
+  }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 11.5px;
+    padding: 10px 0 18px;
+  }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="dot" id="statusDot"></span>
+    <h1>UniRT <span id="modelName">— not connected</span></h1>
+  </div>
+  <div class="endpoint">
+    <input id="baseUrl" value="http://127.0.0.1:8080" spellcheck="false">
+    <button id="connectBtn" type="button">Connect</button>
+  </div>
+</header>
+
+<div class="stats">
+  <div class="stat device">
+    <div class="label">Device</div>
+    <div class="value" id="statDevice">—</div>
+  </div>
+  <div class="stat">
+    <div class="label">Model memory</div>
+    <div class="value" id="statModel">—</div>
+  </div>
+  <div class="stat kv">
+    <div class="label">KV cache</div>
+    <div class="value" id="statKv">—</div>
+  </div>
+  <div class="stat">
+    <div class="label">Device peak</div>
+    <div class="value" id="statPeak">—</div>
+  </div>
+  <div class="stat">
+    <div class="label">Process RSS</div>
+    <div class="value" id="statRss">—</div>
+  </div>
+</div>
+
+<main>
+  <div id="log"></div>
+  <form id="composer">
+    <textarea id="input" rows="1" placeholder="Ask something… (Shift+Enter for newline)"></textarea>
+    <button id="sendBtn" type="submit">Send</button>
+  </form>
+</main>
+
+<footer>Streaming via /v1/chat/completions · stats via /v1/stats · everything runs on your machine</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const log = $('log');
+const dot = $('statusDot');
+const modelName = $('modelName');
+let statsTimer = null;
+let messages = [];
+
+function addMessage(role, text) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + role;
+  el.textContent = text;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+function fmtBytes(n) {
+  if (n === null || n === undefined || n < 0) return '—';
+  if (n === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0, v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return v.toFixed(v >= 10 || i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+async function refreshStats() {
+  const base = $('baseUrl').value.replace(/\/$/, '');
+  try {
+    const res = await fetch(base + '/v1/stats');
+    if (!res.ok) throw new Error('stats HTTP ' + res.status);
+    const s = await res.json();
+    $('statDevice').textContent = s.device_name || 'unknown';
+    $('statModel').textContent = fmtBytes(s.model_bytes);
+    $('statKv').textContent = fmtBytes(s.kv_cache_bytes);
+    $('statPeak').textContent = fmtBytes(s.device_peak_bytes);
+    $('statRss').textContent = fmtBytes(s.process_rss_bytes);
+    dot.className = 'dot live';
+  } catch (e) {
+    dot.className = 'dot error';
+  }
+}
+
+async function connect() {
+  const base = $('baseUrl').value.replace(/\/$/, '');
+  try {
+    const res = await fetch(base + '/v1/models');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const id = data.data && data.data[0] && data.data[0].id;
+    modelName.textContent = '— ' + (id || 'connected');
+    dot.className = 'dot live';
+    if (statsTimer) clearInterval(statsTimer);
+    refreshStats();
+    statsTimer = setInterval(refreshStats, 2000);
+  } catch (e) {
+    modelName.textContent = '— connection failed';
+    dot.className = 'dot error';
+  }
+}
+
+async function send(text) {
+  const base = $('baseUrl').value.replace(/\/$/, '');
+  messages.push({ role: 'user', content: text });
+  const assistantEl = addMessage('assistant', '');
+  assistantEl.classList.add('pending');
+
+  $('sendBtn').disabled = true;
+  try {
+    const res = await fetch(base + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, stream: true }),
+    });
+    if (!res.ok || !res.body) {
+      const errText = await res.text().catch(() => '');
+      throw new Error('HTTP ' + res.status + ' ' + errText);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let full = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n\n');
+      buf = lines.pop();
+      for (const chunk of lines) {
+        const line = chunk.trim();
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        const json = JSON.parse(payload);
+        const delta = json.choices && json.choices[0] && json.choices[0].delta;
+        if (delta && delta.content) {
+          full += delta.content;
+          assistantEl.textContent = full;
+          log.scrollTop = log.scrollHeight;
+        }
+      }
+    }
+    messages.push({ role: 'assistant', content: full });
+  } catch (e) {
+    assistantEl.classList.remove('pending');
+    assistantEl.className = 'msg system';
+    assistantEl.textContent = 'error: ' + e.message;
+    messages.pop();
+    return;
+  } finally {
+    assistantEl.classList.remove('pending');
+    $('sendBtn').disabled = false;
+    refreshStats();
+  }
+}
+
+$('connectBtn').addEventListener('click', connect);
+
+$('composer').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const box = $('input');
+  const text = box.value.trim();
+  if (!text) return;
+  addMessage('user', text);
+  box.value = '';
+  box.style.height = 'auto';
+  send(text);
+});
+
+$('input').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && !ev.shiftKey) {
+    ev.preventDefault();
+    $('composer').requestSubmit();
+  }
+});
+
+$('input').addEventListener('input', function () {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 140) + 'px';
+});
+
+connect();
+</script>
+</body>
+</html>
