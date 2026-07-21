@@ -121,7 +121,8 @@ jobs:
       - name: Sync wrapper source (bindings only — sdk/plugins/third-party never leave this repo)
         run: |
           set -e
-          rsync -a --delete --exclude unirt/lib core/bindings/python/ unirt-sdk/python/
+          rsync -a --delete --exclude unirt/lib --exclude LICENSE --exclude README.md \
+            core/bindings/python/ unirt-sdk/python/
           rsync -a --delete core/bindings/android/kotlin/ unirt-sdk/android/kotlin/
           rsync -a --delete core/bindings/android/test/ unirt-sdk/android/test/
           cp core/bindings/android/jni/unirt_jni.cpp unirt-sdk/android/jni/unirt_jni.cpp
