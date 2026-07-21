@@ -291,11 +291,31 @@ void LlamaModel::load(const std::string& model_dir, const LlamaConfig& cfg) {
     }
 }
 
+namespace {
+constexpr int32_t kCacheInitialCapacity = 256;
+}  // namespace
+
+void LlamaModel::reserve_cache(int32_t max_capacity) {
+    if (max_capacity <= 0) throw std::invalid_argument("cache capacity must be positive");
+    max_capacity_ = max_capacity;
+    allocated_    = 0;
+    for (auto& l : layers_) {
+        l.k_cache.reset();
+        l.v_cache.reset();
+    }
+    n_past_ = 0;
+}
+
 int64_t LlamaModel::kv_cache_bytes() const {
+    // The buffer only ever holds allocated_ tokens' worth of physical
+    // storage (not max_capacity_'s), but nbytes() alone would still report
+    // the fully-allocated size rather than how much of it holds live KV
+    // data for the current transcript; scale by the in-use fraction.
+    if (allocated_ <= 0) return 0;
     int64_t total = 0;
     for (const auto& l : layers_) {
-        if (l.k_cache) total += static_cast<int64_t>(l.k_cache->nbytes());
-        if (l.v_cache) total += static_cast<int64_t>(l.v_cache->nbytes());
+        if (l.k_cache) total += static_cast<int64_t>(l.k_cache->nbytes()) * n_past_ / allocated_;
+        if (l.v_cache) total += static_cast<int64_t>(l.v_cache->nbytes()) * n_past_ / allocated_;
     }
     return total;
 }
@@ -307,10 +327,27 @@ std::vector<float> LlamaModel::forward_logits(const std::vector<int32_t>& tokens
             throw std::out_of_range("token id is outside the model vocabulary");
         }
     }
+    if (max_capacity_ <= 0) {
+        throw std::runtime_error("forward_logits called before reserve_cache");
+    }
     const int32_t T        = static_cast<int32_t>(tokens.size());
+    if (n_past_ + T > max_capacity_) {
+        throw std::out_of_range("forward_logits would exceed the reserved KV cache capacity");
+    }
     const int32_t n_heads  = cfg_.num_attention_heads;
     const int32_t n_kv     = cfg_.num_key_value_heads;
     const int32_t head_dim = cfg_.hidden_size / n_heads;
+
+    // Grow the physical buffer by doubling (capped at max_capacity_) rather
+    // than allocating the whole ceiling up front — most steps just write
+    // into already-reserved slots; only the occasional doubling event
+    // pays a one-time copy-forward of the valid prefix.
+    int32_t new_capacity = allocated_;
+    if (n_past_ + T > new_capacity) {
+        new_capacity = new_capacity > 0 ? new_capacity : kCacheInitialCapacity;
+        while (new_capacity < n_past_ + T) new_capacity *= 2;
+        new_capacity = std::min(new_capacity, max_capacity_);
+    }
 
     mx::array ids = mx::array(tokens.data(), {1, T}, mx::int32);
     mx::array x   = mx::take(embed_, ids, 0);  // [1, T, H]
@@ -330,17 +367,37 @@ std::vector<float> LlamaModel::forward_logits(const std::vector<int32_t>& tokens
         q = mx::fast::rope(q, head_dim, /*traditional=*/false, cfg_.rope_theta, /*scale=*/1.f, n_past_);
         k = mx::fast::rope(k, head_dim, /*traditional=*/false, cfg_.rope_theta, /*scale=*/1.f, n_past_);
 
-        if (l.k_cache) {
-            k = mx::concatenate({*l.k_cache, k}, 2);
-            v = mx::concatenate({*l.v_cache, v}, 2);
+        if (!l.k_cache) {
+            // First write since load()/reserve_cache()/reset_cache().
+            const mx::Shape full_shape{1, n_kv, new_capacity, head_dim};
+            l.k_cache = mx::zeros(full_shape, k.dtype());
+            l.v_cache = mx::zeros(full_shape, v.dtype());
+        } else if (new_capacity > allocated_) {
+            // Doubling event: reallocate at the new size and copy forward
+            // only the valid prefix (garbage past n_past_ is never read).
+            const mx::Shape full_shape{1, n_kv, new_capacity, head_dim};
+            mx::array grown_k = mx::zeros(full_shape, l.k_cache->dtype());
+            mx::array grown_v = mx::zeros(full_shape, l.v_cache->dtype());
+            if (n_past_ > 0) {
+                mx::array old_k = mx::slice(*l.k_cache, {0, 0, 0, 0}, {1, n_kv, n_past_, head_dim});
+                mx::array old_v = mx::slice(*l.v_cache, {0, 0, 0, 0}, {1, n_kv, n_past_, head_dim});
+                grown_k = mx::slice_update(grown_k, old_k, {0, 0, 0, 0}, {1, n_kv, n_past_, head_dim});
+                grown_v = mx::slice_update(grown_v, old_v, {0, 0, 0, 0}, {1, n_kv, n_past_, head_dim});
+            }
+            l.k_cache = grown_k;
+            l.v_cache = grown_v;
         }
-        l.k_cache = k;
-        l.v_cache = v;
+        l.k_cache = mx::slice_update(*l.k_cache, k, {0, 0, n_past_, 0},
+                                      {1, n_kv, n_past_ + T, head_dim});
+        l.v_cache = mx::slice_update(*l.v_cache, v, {0, 0, n_past_, 0},
+                                      {1, n_kv, n_past_ + T, head_dim});
+        mx::array k_valid = mx::slice(*l.k_cache, {0, 0, 0, 0}, {1, n_kv, n_past_ + T, head_dim});
+        mx::array v_valid = mx::slice(*l.v_cache, {0, 0, 0, 0}, {1, n_kv, n_past_ + T, head_dim});
 
         const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
         mx::array   attn  = (T > 1)
-                                ? mx::fast::scaled_dot_product_attention(q, k, v, scale, "causal", std::nullopt)
-                                : mx::fast::scaled_dot_product_attention(q, k, v, scale, "", std::nullopt);
+                                ? mx::fast::scaled_dot_product_attention(q, k_valid, v_valid, scale, "causal", std::nullopt)
+                                : mx::fast::scaled_dot_product_attention(q, k_valid, v_valid, scale, "", std::nullopt);
 
         attn = mx::reshape(mx::transpose(attn, {0, 2, 1, 3}), {1, T, n_heads * head_dim});
         x    = x + l.wo.apply(attn);
@@ -359,7 +416,8 @@ std::vector<float> LlamaModel::forward_logits(const std::vector<int32_t>& tokens
     mx::array logits = mx::astype(mx::reshape(lm_head_.apply(last), {cfg_.vocab_size}), mx::float32);
     mx::eval(logits);
 
-    n_past_ += T;
+    n_past_    += T;
+    allocated_  = new_capacity;
 
     std::vector<float> out(static_cast<size_t>(cfg_.vocab_size));
     std::memcpy(out.data(), logits.data<float>(), out.size() * sizeof(float));
@@ -367,34 +425,18 @@ std::vector<float> LlamaModel::forward_logits(const std::vector<int32_t>& tokens
 }
 
 void LlamaModel::reset_cache() {
-    for (auto& l : layers_) {
-        l.k_cache.reset();
-        l.v_cache.reset();
-    }
+    // Buffers stay allocated at their reserved capacity; only the valid-
+    // length marker resets. The next forward_logits() overwrites from
+    // slot 0, so there's nothing to free or re-zero here.
     n_past_ = 0;
 }
 
 bool LlamaModel::trim_cache(int32_t n_past) {
     if (n_past < 0 || n_past > n_past_) return false;
-    if (n_past == n_past_) return true;
-    if (n_past == 0) {
-        reset_cache();
-        return true;
-    }
-
-    std::vector<mx::array> trimmed;
-    for (auto& layer : layers_) {
-        if (!layer.k_cache || !layer.v_cache) return false;
-        const auto& ks = layer.k_cache->shape();
-        const auto& vs = layer.v_cache->shape();
-        layer.k_cache = mx::slice(*layer.k_cache, {0, 0, 0, 0},
-                                  {ks[0], ks[1], n_past, ks[3]});
-        layer.v_cache = mx::slice(*layer.v_cache, {0, 0, 0, 0},
-                                  {vs[0], vs[1], n_past, vs[3]});
-        trimmed.push_back(*layer.k_cache);
-        trimmed.push_back(*layer.v_cache);
-    }
-    mx::eval(trimmed);
+    // Rewinding a fixed-capacity buffer is just moving the valid-length
+    // marker back — slots past the new n_past are never read (every
+    // forward_logits() call slices [0, n_past_+T)) and get overwritten in
+    // place once new tokens land there.
     n_past_ = n_past;
     return true;
 }

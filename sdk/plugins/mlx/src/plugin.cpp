@@ -3,6 +3,7 @@
 
 #include "plugin/plugin_export.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -133,6 +134,7 @@ class MlxLlm : public LlmBackend {
             model_.reset_cache();
             return UNIRT_ERROR_COMMON_INVALID_INPUT;
         }
+        model_.reserve_cache(n_ctx_);
         transcript_.clear();
         UNIRT_LOG_INFO("mlx: loaded {} ({} layers, vocab {}, ctx {})", model_dir.string(),
                         model_.config().num_hidden_layers, model_.config().vocab_size, n_ctx_);
@@ -262,8 +264,11 @@ class MlxLlm : public LlmBackend {
         }
 
         if (fresh_ids.size() > static_cast<size_t>(n_ctx_ - model_.n_past())) {
-            UNIRT_LOG_ERROR("mlx: context length {} exceeded", n_ctx_);
-            return UNIRT_ERROR_LLM_TOKENIZATION_CONTEXT_LENGTH;
+            if (!shift_context() ||
+                fresh_ids.size() > static_cast<size_t>(n_ctx_ - model_.n_past())) {
+                UNIRT_LOG_ERROR("mlx: context length {} exceeded", n_ctx_);
+                return UNIRT_ERROR_LLM_TOKENIZATION_CONTEXT_LENGTH;
+            }
         }
 
         const int32_t eos = tokenizer_.eos_id() >= 0 ? tokenizer_.eos_id() : model_.config().eos_token_id;
@@ -290,7 +295,7 @@ class MlxLlm : public LlmBackend {
                 }
                 break;
             }
-            if (model_.n_past() >= n_ctx_) {
+            if (model_.n_past() >= n_ctx_ && !shift_context()) {
                 stop_reason = "context_length";
                 if (!stream_state.emit_safe(input->on_token, input->user_data, true)) {
                     stream_state.discard_unemitted();
@@ -368,6 +373,25 @@ class MlxLlm : public LlmBackend {
     }
 
    private:
+    // Evicts the older half of the cached transcript to make room when the
+    // context fills up (mirrors llama_cpp's context shifting, per
+    // CLAUDE.md). MLX has no in-place "shift cached RoPE positions" op
+    // exposed, so instead of rotating the existing KV cache this discards
+    // the oldest tokens and re-runs forward_logits() over the retained
+    // tail — identical math to a fresh prefill of that tail, just paid
+    // again at eviction time instead of never. Returns false only if there
+    // is nothing left to keep (n_ctx_ <= 1).
+    bool shift_context() {
+        if (n_ctx_ <= 1 || transcript_.empty()) return false;
+        const size_t keep = std::min(transcript_.size(), static_cast<size_t>(std::max(1, n_ctx_ / 2)));
+        std::vector<int32_t> retained(transcript_.end() - static_cast<ptrdiff_t>(keep), transcript_.end());
+        model_.reset_cache();
+        model_.forward_logits(retained);
+        transcript_.assign(retained.begin(), retained.end());
+        UNIRT_LOG_DEBUG("mlx: context shifted, retained {} of {} token budget", keep, n_ctx_);
+        return true;
+    }
+
     BpeTokenizer tokenizer_;
     LlamaModel   model_;
     int32_t      n_ctx_ = 0;

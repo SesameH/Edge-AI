@@ -86,6 +86,27 @@ class TestMlx:
     def test_generate_capital(self, mlx_model):
         assert 'Paris' in ask_capital(mlx_model)
 
+    def test_context_overflow_evicts_instead_of_stopping(self, sdk):
+        from conftest import require_mlx
+
+        require_mlx(sdk)
+        from unirt.auto import AutoModelForCausalLM
+
+        # A context this small guarantees the request below overflows it,
+        # forcing the KV-cache eviction path (sdk/plugins/mlx/src/plugin.cpp
+        # shift_context()) instead of a hard "context_length" stop.
+        m = AutoModelForCausalLM.from_pretrained(model_path('safetensors'), device_map='mlx', n_ctx=48)
+        try:
+            prompt = m._apply_chat_template(
+                [{'role': 'user', 'content': 'Count from one to one hundred, one number per line.'}],
+                True, False, None)
+            out = m.generate(prompt, max_new_tokens=120)
+            assert out.text
+            assert out.profile.stop_reason != 'context_length'
+            m.reset()
+        finally:
+            m.close()
+
     def test_chat_template_is_chatml(self, mlx_model):
         prompt = mlx_model._apply_chat_template(
             [{'role': 'user', 'content': 'hi'}], True, False, None)

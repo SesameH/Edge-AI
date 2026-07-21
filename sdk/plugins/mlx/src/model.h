@@ -53,6 +53,13 @@ class LlamaModel {
    public:
     void load(const std::string& model_dir, const LlamaConfig& cfg);
 
+    // Set the KV cache's hard ceiling (in tokens) and clear it. Must be
+    // called once after load(), before the first forward_logits(), and not
+    // changed afterwards. The cache's actual buffer starts small and grows
+    // by doubling as needed (see forward_logits), capped at this ceiling —
+    // it never allocates more than the conversation has actually used.
+    void reserve_cache(int32_t max_capacity);
+
     // Feed `tokens`; append K/V to the cache; return float32 logits of the
     // last position (host copy, size vocab_size).
     std::vector<float> forward_logits(const std::vector<int32_t>& tokens);
@@ -60,6 +67,7 @@ class LlamaModel {
     void    reset_cache();
     bool    trim_cache(int32_t n_past);
     int32_t n_past() const { return n_past_; }
+    int32_t cache_capacity() const { return max_capacity_; }
     const LlamaConfig& config() const { return cfg_; }
 
     int64_t weights_bytes() const { return weights_bytes_; }
@@ -79,6 +87,8 @@ class LlamaModel {
     mlx::core::array   final_norm_{0.f};
     std::vector<Layer> layers_;
     int32_t            n_past_        = 0;
+    int32_t            max_capacity_  = 0;  // ceiling negotiated via reserve_cache (== n_ctx)
+    int32_t            allocated_     = 0;  // current physical buffer size, <= max_capacity_
     int64_t            weights_bytes_ = 0;
 };
 

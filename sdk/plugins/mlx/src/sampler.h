@@ -45,52 +45,54 @@ class Sampler {
 
         for (auto& l : logits) l /= temperature_;
 
-        // candidate set: top-k (0 = all)
-        std::vector<int32_t> idx(logits.size());
-        std::iota(idx.begin(), idx.end(), 0);
-        size_t k = (top_k_ > 0 && static_cast<size_t>(top_k_) < idx.size())
+        // candidate set: top-k (0 = all). idx_/probs_ are member scratch
+        // reused across every token in a generate() call instead of a
+        // fresh heap allocation per step.
+        idx_.resize(logits.size());
+        std::iota(idx_.begin(), idx_.end(), 0);
+        size_t k = (top_k_ > 0 && static_cast<size_t>(top_k_) < idx_.size())
                        ? static_cast<size_t>(top_k_)
-                       : idx.size();
-        std::partial_sort(idx.begin(), idx.begin() + k, idx.end(),
+                       : idx_.size();
+        std::partial_sort(idx_.begin(), idx_.begin() + k, idx_.end(),
                           [&](int32_t a, int32_t b) { return logits[a] > logits[b]; });
-        idx.resize(k);
+        idx_.resize(k);
 
         // softmax over candidates
-        float              max_l = logits[idx[0]];
-        std::vector<float> probs(k);
-        float              sum = 0.f;
+        float max_l = logits[idx_[0]];
+        probs_.resize(k);
+        float sum = 0.f;
         for (size_t i = 0; i < k; ++i) {
-            probs[i] = std::exp(logits[idx[i]] - max_l);
-            sum += probs[i];
+            probs_[i] = std::exp(logits[idx_[i]] - max_l);
+            sum += probs_[i];
         }
-        for (auto& p : probs) p /= sum;
+        for (auto& p : probs_) p /= sum;
 
         // min-p: drop candidates below min_p * p_max
         if (min_p_ > 0.f) {
-            float cutoff = min_p_ * probs[0];
+            float cutoff = min_p_ * probs_[0];
             size_t end   = k;
-            while (end > 1 && probs[end - 1] < cutoff) --end;
-            probs.resize(end);
-            idx.resize(end);
+            while (end > 1 && probs_[end - 1] < cutoff) --end;
+            probs_.resize(end);
+            idx_.resize(end);
         }
 
         // top-p: smallest prefix with cumulative prob >= top_p
         if (top_p_ > 0.f && top_p_ < 1.f) {
             float  cum = 0.f;
-            size_t end = probs.size();
-            for (size_t i = 0; i < probs.size(); ++i) {
-                cum += probs[i];
+            size_t end = probs_.size();
+            for (size_t i = 0; i < probs_.size(); ++i) {
+                cum += probs_[i];
                 if (cum >= top_p_) {
                     end = i + 1;
                     break;
                 }
             }
-            probs.resize(end);
-            idx.resize(end);
+            probs_.resize(end);
+            idx_.resize(end);
         }
 
-        std::discrete_distribution<size_t> dist(probs.begin(), probs.end());
-        return idx[dist(rng_)];
+        std::discrete_distribution<size_t> dist(probs_.begin(), probs_.end());
+        return idx_[dist(rng_)];
     }
 
    private:
@@ -117,6 +119,8 @@ class Sampler {
 
     std::mt19937                       rng_;
     std::unordered_map<int32_t, int>   counts_;
+    std::vector<int32_t>               idx_;
+    std::vector<float>                 probs_;
 };
 
 }  // namespace unirt::mlx_plugin
