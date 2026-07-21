@@ -134,9 +134,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Build & test Kotlin binding (plain JVM module, no Android SDK needed)
-        run: ./gradlew build --console=plain
+      - name: Build the AAR and run Kotlin unit tests
+        run: ./gradlew assembleRelease testReleaseUnitTest --console=plain
         working-directory: bindings/android
+      - name: Verify the AAR bundled every native library
+        run: |
+          AAR=$(find bindings/android/build/outputs/aar -name "*.aar")
+          unzip -l "$AAR" | grep -E "jni/arm64-v8a/lib(unirt|unirt_jni|unirt_plugin_llama_cpp|llama|mtmd|ggml|ggml-cpu|ggml-base|omp)\.so"
 
   ios:
     name: iOS arm64 (simulator tests)

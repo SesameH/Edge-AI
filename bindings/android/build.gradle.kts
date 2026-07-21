@@ -1,47 +1,69 @@
 // Copyright (c) 2026 Peter Huang.
 // SPDX-License-Identifier: BSD-3-Clause
 
-// Plain Kotlin/JVM module, not an Android library module: bindings/android/kotlin
-// has zero android.* imports (System.loadLibrary is plain java.lang), so there's
-// nothing here that needs the Android Gradle Plugin or an Android SDK. This exists
-// so the Kotlin sources are actually compiled and unit-tested by something (CI's
-// `android` job only ever NDK-builds the native side) — an app consuming this
-// binding still copies kotlin/ai/unirt/** into its own Android module per README.md;
-// this project is for verifying the sources, not for shipping an AAR.
+// Real Android library module — ./gradlew assembleRelease produces an AAR
+// with the JNI glue + llama_cpp plugin + libunirt (and llama.cpp's own
+// libggml*/libllama/libmtmd) already bundled per ABI, via externalNativeBuild
+// pointing at the same jni/CMakeLists.txt the manual "copy .so files in"
+// workflow in README.md uses — both paths build from the identical CMake
+// project, just driven differently (AGP drives this one; the README's manual
+// path is for apps that would rather manage native libs themselves).
 //
-// LlmSession/VlmSession are interfaces specifically so they're fakeable here:
-// Native's System.loadLibrary("unirt_jni") means anything touching NativeLlmSession/
-// NativeVlmSession/Native directly cannot run in a plain JVM test — those need a
-// real device/emulator (future work, same as Android instrumentation tests).
+// LlmSession/VlmSession are interfaces specifically so they're fakeable in
+// test/: Native's System.loadLibrary("unirt_jni") means anything touching
+// NativeLlmSession/NativeVlmSession/Native directly cannot run in a local
+// unit test (no device/emulator) — those need instrumentation tests (future
+// work). Local unit tests need no android.* framework classes here (the
+// sources have none), so they run as plain JVM tests without Robolectric.
 
 plugins {
-    kotlin("jvm") version "2.0.21"
+    id("com.android.library") version "8.7.3"
+    kotlin("android") version "2.0.21"
 }
 
-repositories {
-    mavenCentral()
-}
+android {
+    namespace = "ai.unirt"
+    compileSdk = 35
+    ndkVersion = "27.0.12077973"
 
-kotlin {
-    // Cross-target bytecode level only (no Gradle toolchain provisioning):
-    // whatever JDK runs Gradle can emit Java 17 class files directly, so
-    // this doesn't require a JDK 17 install on top of it.
-    compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    defaultConfig {
+        minSdk = 28 // matches ANDROID_PLATFORM=android-28 used everywhere else in this repo
+
+        externalNativeBuild {
+            cmake {
+                abiFilters += "arm64-v8a"
+                arguments += listOf(
+                    "-DUNIRT_PLUGIN_MLX=OFF",
+                    "-DUNIRT_PLUGIN_ONNXRUNTIME=OFF",
+                )
+            }
+        }
     }
+
+    externalNativeBuild {
+        cmake {
+            path = file("jni/CMakeLists.txt")
+        }
+    }
+
     sourceSets {
-        main {
+        getByName("main") {
             kotlin.srcDirs("kotlin")
         }
-        test {
+        getByName("test") {
             kotlin.srcDirs("test")
         }
     }
-}
 
-java {
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    @Suppress("UnstableApiUsage")
+    kotlinOptions {
+        jvmTarget = "17"
+    }
 }
 
 dependencies {
@@ -50,6 +72,6 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
 }
 
-tasks.test {
+tasks.withType<Test> {
     useJUnitPlatform()
 }

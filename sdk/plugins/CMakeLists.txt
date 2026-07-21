@@ -45,11 +45,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # ANDROID_NDK is a CMake variable the NDK's own toolchain file always
+    # populates (from -DANDROID_NDK=... or auto-detected from the toolchain
+    # file's location) regardless of who drives the build. $ENV{ANDROID_NDK_ROOT}
+    # only happens to be set in our own CI/README invocations — Android
+    # Studio's Gradle plugin (externalNativeBuild) never sets it, and would
+    # otherwise fail this check on every AGP-driven build.
     file(GLOB_RECURSE _android_libomp
-        "$ENV{ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/*/libomp.so")
+        "${ANDROID_NDK}/toolchains/llvm/prebuilt/*/libomp.so")
     list(FILTER _android_libomp INCLUDE REGEX "/lib/linux/aarch64/libomp.so$")
     if(NOT _android_libomp)
-        message(FATAL_ERROR "Android NDK libomp.so not found under $ENV{ANDROID_NDK_ROOT}")
+        message(FATAL_ERROR "Android NDK libomp.so not found under ${ANDROID_NDK}")
     endif()
     list(GET _android_libomp 0 _android_libomp)
     install(FILES "${_android_libomp}" DESTINATION lib/llama_cpp)

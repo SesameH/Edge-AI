@@ -8,6 +8,8 @@ compile_commands.json
 
 # Gradle local cache (bindings/android) — gradle/wrapper + gradlew are committed
 .gradle/
+.cxx/
+local.properties
 
 # Test models (downloaded per README; hundreds of MB)
 models/

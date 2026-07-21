@@ -3,7 +3,33 @@
 Kotlin + JNI layer over the UniRT C API. LLM (text) and VLM (multimodal)
 both via llama_cpp/GGUF; embeddings follow the same pattern when needed.
 
-## Build the native libraries
+## Build the AAR
+
+`bindings/android` is a real Android library module (Gradle + AGP,
+`com.android.library`) — `externalNativeBuild` drives `jni/CMakeLists.txt`
+itself, so the resulting AAR already bundles `libunirt.so`,
+`libunirt_plugin_llama_cpp.so`, `libunirt_jni.so`, llama.cpp's own
+`libggml*`/`libllama`/`libmtmd`, and `libomp.so`, all under `jni/arm64-v8a/`.
+
+```sh
+cd bindings/android
+./gradlew assembleRelease   # -> build/outputs/aar/unirt-android-release.aar
+./gradlew test              # unit tests: fakes LlmSession/VlmSession — anything
+                             # touching Native itself needs a real device/emulator
+```
+
+Needs `ANDROID_HOME`/`ANDROID_SDK_ROOT` set (NDK 27.0.12077973, matched in
+`build.gradle.kts`'s `ndkVersion`) and a JDK 17. Add the AAR as a dependency
+in your app module — plugins are still discovered automatically at runtime
+(the registry scans the directory holding `libunirt.so` for the flat
+`libunirt_plugin_<id>.so` naming), no environment variables needed.
+
+Only `arm64-v8a` is built today (`abiFilters` in `build.gradle.kts`), matching
+what CI actually tests; add more ABIs there if you need them, untested.
+
+## Build manually instead (no Gradle/AAR)
+
+If you'd rather manage the native libraries yourself:
 
 ```sh
 cmake -S bindings/android/jni -B build-android \
@@ -22,9 +48,8 @@ Copy into your app module:
 - llama.cpp's `libllama.so` / `libggml*.so` from the build tree → same dir
 - `bindings/android/kotlin/ai/unirt/**` → your source set
 
-Plugins are discovered automatically: the registry scans the directory that
-holds `libunirt.so` (the app's native lib dir) for the flat
-`libunirt_plugin_<id>.so` naming — no environment variables needed.
+Both paths build from the same `jni/CMakeLists.txt` — the AAR path is just
+AGP driving it instead of you doing so by hand.
 
 ## Use
 
@@ -82,20 +107,6 @@ Kotlin conventions over ceremony: default arguments instead of builders,
 interfaces.
 
 Models ship however the app prefers (assets, download at first run); pass an
-absolute filesystem path. CI cross-compiles the native side for arm64-v8a on
-every push; on-device instrumentation tests are future work.
-
-## Verify the Kotlin sources
-
-`bindings/android` is also a plain Kotlin/JVM Gradle module (not an Android
-library — the sources have no `android.*` dependency, `System.loadLibrary`
-aside) so the Kotlin actually gets compiled and unit-tested by something,
-rather than only ever existing as loose files an app copies in:
-
-```sh
-cd bindings/android
-./gradlew build   # compiles kotlin/, runs test/ (fakes LlmSession/VlmSession —
-                   # anything touching Native itself needs a real device/emulator)
-```
-
-CI runs this on every push alongside the native NDK build.
+absolute filesystem path. CI builds the AAR and runs its unit tests on every
+push, alongside a standalone native NDK build exercising the manual path
+above; on-device instrumentation tests are future work.
