@@ -34,7 +34,9 @@
     --cyan: #23e6ef;
     --cyan-dim: #0f8890;
     --danger: #ff5470;
-    --radius: 3px;
+    --violet: #9d7bff;
+    --violet-dim: #5a3cff;
+    --radius: 12px;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
@@ -53,10 +55,10 @@
     position: relative;
     display: flex;
     flex-direction: column;
-    max-width: 1120px;
+    width: 100%;
     height: 100%;
     margin: 0 auto;
-    padding: 20px 20px 0;
+    padding: 20px 28px 0;
   }
   /* Glow orbs the glass panels actually pick up — without these, a
      backdrop-filter blur over a flat dark background is invisible. */
@@ -221,9 +223,9 @@
     gap: 16px;
   }
   .msg {
-    max-width: 78%;
-    padding: 11px 15px;
-    border-radius: var(--radius);
+    max-width: 68%;
+    padding: 11px 16px;
+    border-radius: 16px;
     line-height: 1.55;
     font-size: 14.5px;
     white-space: pre-wrap;
@@ -231,20 +233,24 @@
   }
   .msg.user {
     align-self: flex-end;
-    background: rgba(35,230,239,0.08);
+    background: rgba(35,230,239,0.10);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    border: 1px solid var(--line-bright);
+    border: 1px solid var(--cyan-dim);
     color: var(--text);
+    border-bottom-right-radius: 4px;
   }
   .msg.assistant {
     align-self: flex-start;
-    background: var(--panel-2);
-    border: 1px solid var(--line);
+    background: rgba(157,123,255,0.08);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--violet-dim);
+    border-bottom-left-radius: 4px;
   }
   .msg.assistant.pending::after {
     content: "▍";
-    color: var(--cyan);
+    color: var(--violet);
     animation: blink 1s step-start infinite;
   }
   @keyframes blink { 50% { opacity: 0; } }
