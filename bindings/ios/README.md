@@ -1,23 +1,77 @@
 # UniRT iOS binding
 
-Swift wrapper (`UniRTKit`) over the UniRT C API, plus a `CUniRT` module that
-exposes `sdk/include/unirt.h` to Swift. Text generation (llama_cpp / GGUF)
-only for now; VLM and embeddings follow the same pattern when needed.
+Swift wrapper (`UniRTKit`) over the UniRT C API: LLM (text) and VLM
+(multimodal) both via llama_cpp/GGUF; embeddings follow the same pattern
+when needed.
 
 Unlike Android, there is no JNI-style glue layer: Swift calls the C ABI
 directly. The one iOS-specific wrinkle is plugin loading — iOS forbids
 `dlopen` of arbitrary paths, so plugins cannot be discovered from a
 directory scan the way `llama_cpp` is on macOS/Linux/Windows. Instead the
 app links the plugin as a **static library** and joins it in-process with
-`unirt_register_plugin()` before `unirt_init()`. `sdk/CMakeLists.txt`
-already builds this way when `UNIRT_BUILD_SHARED=OFF` (the same
-configuration the `ios` CI job uses).
+`unirt_register_plugin()` before `unirt_init()`.
 
-## Build the native static libraries
+## Build the XCFramework (recommended)
+
+`bindings/ios/framework/` is a small CMake project that merges
+`libunirt` + the llama_cpp plugin + llama.cpp's own `libggml*`/`libllama`/
+`libmtmd` into **one dylib** per platform slice (`-force_load`ing the two
+UniRT static archives so every C API entry point — and the plugin's
+`unirt_plugin_id`/`unirt_plugin_open` — survive; llama.cpp's own libraries
+don't need that, since the plugin genuinely calls deep into their API, so
+ordinary linking already retains what's used). This is the iOS analog of
+the Android binding's AAR: one artifact, nothing to copy or embed by hand.
 
 ```sh
 git submodule update --init --depth 1 third-party/llama.cpp
 
+cmake -S bindings/ios/framework -B build-ios-framework-sim -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+  -DGGML_METAL=OFF -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
+cmake --build build-ios-framework-sim -j8
+
+cmake -S bindings/ios/framework -B build-ios-framework-device -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+  -DGGML_METAL=OFF -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
+cmake --build build-ios-framework-device -j8
+
+xcodebuild -create-xcframework \
+  -library build-ios-framework-device/libunirt_ios.dylib \
+  -library build-ios-framework-sim/libunirt_ios.dylib \
+  -output bindings/ios/UniRT.xcframework
+```
+
+Then add `bindings/ios` as a local Swift package dependency (Xcode: File →
+Add Package Dependencies → Add Local...) and link `UniRTKit` to your app
+target — that's it. `Package.swift`'s `UniRTNative` binary target picks up
+`UniRT.xcframework` (built above, not checked in — same as `build-ios`) and
+SPM links + embeds it automatically; no manual "Link Binary"/"Embed & Sign"
+steps, no linker flags.
+
+```swift
+import UniRTKit
+
+try UniRT.registerStaticPlugin(identity: unirt_plugin_id, open: unirt_plugin_open)
+try UniRT.start()
+```
+
+(Registration is still explicit — the merged dylib bundles the plugin, but
+doesn't self-register at load time, matching this project's preference for
+explicit calls over load-time magic elsewhere. `unirt_plugin_id`/
+`unirt_plugin_open` are declared in `CUniRT`, resolved from the linked
+`UniRTNative` binary target.)
+
+## Build manually instead (no XCFramework)
+
+If you'd rather manage the native libraries yourself, build against
+`sdk/CMakeLists.txt` directly with `UNIRT_BUILD_SHARED=OFF` — everything
+comes out as a plain static archive (`libunirt.a`, `libunirt_llama_cpp.a`,
+and llama.cpp's own `libllama.a`/`libggml*.a`/`libmtmd.a`; none of them are
+dylibs when built this way, so there's nothing to embed):
+
+```sh
 cmake -S sdk -B build-ios -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos \
   -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
@@ -27,44 +81,13 @@ cmake -S sdk -B build-ios -DCMAKE_BUILD_TYPE=Release \
 cmake --build build-ios -j8
 ```
 
-(Swap `-DCMAKE_OSX_SYSROOT=iphoneos` for `iphonesimulator` for a simulator
-build — that's what CI does to run the native tests under `simctl`; see
-`.github/workflows/ci.yml`'s `ios` job.)
-
-This produces, notably:
-
-- `build-ios/src/libunirt.a` — the C ABI bridge (static)
-- `build-ios/plugins/llama_cpp/src/libunirt_llama_cpp.a` — the llama_cpp
-  backend (static), exporting `unirt_plugin_id()` / `unirt_plugin_open()`
-- `build-ios/bin/libllama.dylib`, `libmtmd.dylib`, `libggml.dylib`,
-  `libggml-cpu.dylib`, `libggml-base.dylib` — llama.cpp's **own** libraries,
-  which `libunirt_llama_cpp.a` links against. `UNIRT_BUILD_SHARED=OFF` only
-  controls UniRT's own targets (`libunirt`/`libunirt_llama_cpp`, so the app
-  can skip the dlopen-based plugin scan); llama.cpp's CMake build produces
-  its usual shared `libggml*`/`libllama`/`libmtmd`, independent of that flag.
-  They're built with `@rpath`-relative install names (`otool -L` on
-  `libunirt_llama_cpp.a`'s dependents confirms this), so a real app embeds
-  them normally — no different from any other vendored dynamic framework.
-
-## Wire it into an Xcode project
-
-1. Add `bindings/ios` as a local Swift package dependency (Xcode: File →
-   Add Package Dependencies → Add Local...) and link `UniRTKit` to your app
-   target.
-2. Add `libunirt.a` and `libunirt_llama_cpp.a` to the app target's "Link
-   Binary With Libraries" build phase (static; no signing needed).
-3. Add the five `libggml*`/`libllama`/`libmtmd` dylibs to "Frameworks,
-   Libraries, and Embedded Content" set to **Embed & Sign** — they're real
-   runtime dependencies of `libunirt_llama_cpp.a`, not build-time-only, and
-   need to ship inside the app bundle for a device build.
-4. Before calling `UniRT.start()`, register the static plugin(s) you linked:
-
-```swift
-import UniRTKit
-
-try UniRT.registerStaticPlugin(identity: unirt_plugin_id, open: unirt_plugin_open)
-try UniRT.start()
-```
+Add every `.a` under `build-ios/` to the app target's "Link Binary With
+Libraries" build phase (static; no signing needed), add `bindings/ios` as a
+local package dependency for the Swift sources only (skip the `UniRTNative`
+binary target — the app is supplying the libraries itself), then register
+and start as above. Both paths build from the same CMake configuration
+(`UNIRT_BUILD_SHARED=OFF`); the XCFramework path just also merges everything
+into one dylib instead of leaving it as several archives you link yourself.
 
 ## Use
 
@@ -84,44 +107,62 @@ for try await piece in session.stream(prompt: prompt) {
 try UniRT.stop()
 ```
 
-`LlmSession` is a Swift `actor`: the native handle is single-threaded by
-contract, and actor isolation confines every native call without extra
-locking, mirroring the Kotlin binding's dedicated-dispatcher approach.
+`VlmSession` mirrors `LlmSession` (same actor, same registration/start
+sequence) but takes multimodal turns (`ContentPart.text`/`.image`/`.audio`)
+and per-request media on `VlmGenerateOptions`:
+
+```swift
+let session = try await UniRT.createVlmSession(
+    modelPath: "/path/to/vision-model.gguf", mmprojPath: "/path/to/mmproj.gguf")
+let prompt = try await session.applyChatTemplate([
+    .user(.text("What's in this image?"), .image(path: "/path/to/photo.jpg")),
+])
+let reply = try await session.generate(
+    prompt: prompt, options: VlmGenerateOptions(imagePaths: ["/path/to/photo.jpg"]))
+```
+
+`LlmSession`/`VlmSession` are Swift `actor`s: the native handle is
+single-threaded by contract, and actor isolation confines every native call
+without extra locking, mirroring the Kotlin binding's dedicated-dispatcher
+approach.
 
 Models ship however the app prefers (bundled resource, downloaded at first
 run); pass an absolute filesystem path — the sandbox means that's usually
 somewhere under `FileManager.default.urls(for: .documentDirectory, ...)`
 or `Bundle.main`.
 
-## Run the integration test
+## Run the integration tests
 
 `Tests/UniRTKitTests/InferenceSmokeTests.swift` is the Swift-layer
-counterpart to `tests/native/test_inference_smoke.cpp`: it registers the
-real llama_cpp plugin, loads a GGUF model, applies the chat template, and
-runs both blocking and streaming generation. `swift test`/`xcodebuild test`
-don't know how to find `libunirt`/`libunirt_llama_cpp`/llama.cpp's dylibs on
-their own (`Package.swift` deliberately has no linker flags baked in, so the
-package stays usable by apps that supply the libraries their own way), so
-point the linker and the runtime loader at the `build-ios` tree explicitly,
-and give the test the model path through an environment variable (it
-`XCTSkip`s without one):
+counterpart to `tests/native/test_inference_smoke.cpp`: registers the real
+llama_cpp plugin, loads a GGUF model, applies the chat template, and runs
+both blocking and streaming generation. `VlmLinkSmokeTests.swift` proves the
+six `unirt_vlm_*` entry points actually link (no VLM test model is available
+to run real multimodal inference, so it only checks that a missing model
+fails cleanly through the whole chain rather than link-erroring or
+crashing).
+
+Once `UniRT.xcframework` is built (see above), both just run:
 
 ```sh
-ROOT="$PWD"   # repo root
-export TEST_RUNNER_UNIRT_TEST_MODEL_PATH="$ROOT/models/SmolLM2-135M-Instruct-Q8_0.gguf"
-xcodebuild test -scheme UniRTKit -destination "id=$SIM_UDID" \
-  LIBRARY_SEARCH_PATHS="\$(inherited) $ROOT/build-ios/src $ROOT/build-ios/plugins/llama_cpp/src $ROOT/build-ios/bin" \
-  OTHER_LDFLAGS="\$(inherited) -lunirt -lunirt_llama_cpp -lmtmd -lllama -lggml -lggml-cpu -lggml-base -lc++" \
-  LD_RUNPATH_SEARCH_PATHS="\$(inherited) $ROOT/build-ios/bin"
+export TEST_RUNNER_UNIRT_TEST_MODEL_PATH="/absolute/path/to/SmolLM2-135M-Instruct-Q8_0.gguf"
+xcodebuild test -scheme UniRTKit -destination "id=$SIM_UDID"   # or 'platform=macOS' to
+                                                                 # sanity-check without a simulator
 ```
 
 (`TEST_RUNNER_`-prefixed variables are xcodebuild's mechanism for passing
-environment into the test process; `$SIM_UDID` is whatever simulator you
-booted — reuse the one from the `ios` CI job's "Boot a simulator" step.)
-This exact recipe (same flags, same library layout) is verified end to end
-against a real model on a static macOS build as a stand-in for the iOS
-static build — same `UNIRT_BUILD_SHARED=OFF` code path, different
-`CMAKE_SYSTEM_NAME`.
+environment into the test process; `InferenceSmokeTests` `XCTSkip`s without
+one.) No linker flags needed — that's the point of the binary target.
+
+This exact mechanism (XCFramework + SPM binary target linking with zero
+manual flags) was verified end to end against a real model, using a
+`macos-arm64` XCFramework slice as a stand-in destination (`platform=macOS`)
+since this dev machine had no iOS Simulator runtime installed — the real
+`ios-arm64`/`ios-arm64-simulator` slices were verified separately for
+correct static merging (`otool -L` shows no llama.cpp dylib dependencies,
+only system frameworks) and symbol presence (`nm -gU` for every
+`unirt_llm_*`/`unirt_vlm_*`/`unirt_plugin_*` entry point), but not run
+end-to-end on a real Simulator by this session.
 
 CI also builds and runs the native static-library tests
 (`unirt-static-registration-test`, `unirt-inference-smoke-test`) on the iOS

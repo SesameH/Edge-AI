@@ -16,10 +16,14 @@ let package = Package(
         // `cmake -S sdk -B build-ios -DCMAKE_SYSTEM_NAME=iOS ...` (see
         // README.md) at the Xcode project level.
         .systemLibrary(name: "CUniRT"),
-        .target(name: "UniRTKit", dependencies: ["CUniRT"]),
-        // Links the real static libraries and runs one generation against a
-        // GGUF model — see README.md's "Run the integration test" section
-        // for the required environment and linker flags.
+        // Built by `cmake --build bindings/ios/framework` (device + simulator)
+        // then `xcodebuild -create-xcframework` — see README.md's "Build the
+        // XCFramework" section. Not checked in (like build-ios, it's a build
+        // artifact); build it before `swift build`/`xcodebuild` resolves this.
+        .binaryTarget(name: "UniRTNative", path: "UniRT.xcframework"),
+        .target(name: "UniRTKit", dependencies: ["CUniRT", "UniRTNative"]),
+        // Runs one generation against a GGUF model — see README.md's "Run
+        // the integration test" section for the required environment.
         .testTarget(name: "UniRTKitTests", dependencies: ["UniRTKit", "CUniRT"]),
     ]
 )

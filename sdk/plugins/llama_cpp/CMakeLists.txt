@@ -12,7 +12,16 @@ set(LLAMA_BUILD_EXAMPLES OFF)
 set(LLAMA_BUILD_SERVER OFF)
 set(LLAMA_BUILD_MTMD ON)
 set(MTMD_VIDEO OFF)
-set(BUILD_SHARED_LIBS ON)
+# Follow our own shared/static choice instead of always forcing llama.cpp's
+# own ggml/llama/mtmd shared: a fully static UNIRT_BUILD_SHARED=OFF build
+# (iOS today, and the merged-dylib build under bindings/ios/framework)
+# needs these static too, or they'd still ship as separate dylibs the
+# embedder has to find at runtime regardless of our own flag.
+if(UNIRT_BUILD_SHARED)
+    set(BUILD_SHARED_LIBS ON)
+else()
+    set(BUILD_SHARED_LIBS OFF)
+endif()
 
 add_subdirectory(
     ../../../third-party/llama.cpp

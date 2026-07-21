@@ -195,14 +195,29 @@ jobs:
           xcrun simctl spawn "$SIM_UDID" "$PWD/build-ios/unirt-static-registration-test"
           xcrun simctl spawn "$SIM_UDID" "$PWD/build-ios/unirt-inference-smoke-test" \
             "$PWD/models/SmolLM2-135M-Instruct-Q8_0.gguf"
+      - name: Build UniRT.xcframework (merges libunirt + plugin + llama.cpp into one dylib per slice)
+        run: >
+          cmake -S bindings/ios/framework -B build-ios-framework-sim -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator
+          -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0
+          -DGGML_METAL=OFF -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache &&
+          cmake --build build-ios-framework-sim -j4 &&
+          cmake -S bindings/ios/framework -B build-ios-framework-device -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos
+          -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0
+          -DGGML_METAL=OFF -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache &&
+          cmake --build build-ios-framework-device -j4 &&
+          rm -rf bindings/ios/UniRT.xcframework &&
+          xcodebuild -create-xcframework
+          -library build-ios-framework-device/libunirt_ios.dylib
+          -library build-ios-framework-sim/libunirt_ios.dylib
+          -output bindings/ios/UniRT.xcframework
       - name: Build & run Swift binding (UniRTKit) against the real plugin
         run: |
-          ROOT="$GITHUB_WORKSPACE"  # $PWD here is bindings/ios (working-directory below), not the repo root
-          export TEST_RUNNER_UNIRT_TEST_MODEL_PATH="$ROOT/models/SmolLM2-135M-Instruct-Q8_0.gguf"
-          xcodebuild test -scheme UniRTKit -destination "id=$SIM_UDID" \
-            LIBRARY_SEARCH_PATHS="\$(inherited) $ROOT/build-ios/src $ROOT/build-ios/plugins/llama_cpp/src $ROOT/build-ios/bin" \
-            OTHER_LDFLAGS="\$(inherited) -lunirt -lunirt_llama_cpp -lmtmd -lllama -lggml -lggml-cpu -lggml-base -lc++" \
-            LD_RUNPATH_SEARCH_PATHS="\$(inherited) $ROOT/build-ios/bin"
+          export TEST_RUNNER_UNIRT_TEST_MODEL_PATH="$GITHUB_WORKSPACE/models/SmolLM2-135M-Instruct-Q8_0.gguf"
+          xcodebuild test -scheme UniRTKit -destination "id=$SIM_UDID"
         working-directory: bindings/ios
 
   windows:

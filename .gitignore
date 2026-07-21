@@ -11,6 +11,9 @@ compile_commands.json
 .cxx/
 local.properties
 
+# Built XCFramework (bindings/ios) — see bindings/ios/framework/CMakeLists.txt
+*.xcframework/
+
 # Test models (downloaded per README; hundreds of MB)
 models/
 
