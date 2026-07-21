@@ -184,6 +184,15 @@ jobs:
           xcrun simctl spawn "$SIM_UDID" "$PWD/build-ios/unirt-static-registration-test"
           xcrun simctl spawn "$SIM_UDID" "$PWD/build-ios/unirt-inference-smoke-test" \
             "$PWD/models/SmolLM2-135M-Instruct-Q8_0.gguf"
+      - name: Build & run Swift binding (UniRTKit) against the real plugin
+        run: |
+          ROOT="$PWD"
+          export TEST_RUNNER_UNIRT_TEST_MODEL_PATH="$ROOT/models/SmolLM2-135M-Instruct-Q8_0.gguf"
+          xcodebuild test -scheme UniRTKit -destination "id=$SIM_UDID" \
+            LIBRARY_SEARCH_PATHS="\$(inherited) $ROOT/build-ios/src $ROOT/build-ios/plugins/llama_cpp/src $ROOT/build-ios/bin" \
+            OTHER_LDFLAGS="\$(inherited) -lunirt -lunirt_llama_cpp -lmtmd -lllama -lggml -lggml-cpu -lggml-base -lc++" \
+            LD_RUNPATH_SEARCH_PATHS="\$(inherited) $ROOT/build-ios/bin"
+        working-directory: bindings/ios
 
   windows:
     name: ${{ matrix.label }} (llama_cpp)
