@@ -197,7 +197,7 @@ jobs:
             "$PWD/models/SmolLM2-135M-Instruct-Q8_0.gguf"
       - name: Build & run Swift binding (UniRTKit) against the real plugin
         run: |
-          ROOT="$PWD"
+          ROOT="$GITHUB_WORKSPACE"  # $PWD here is bindings/ios (working-directory below), not the repo root
           export TEST_RUNNER_UNIRT_TEST_MODEL_PATH="$ROOT/models/SmolLM2-135M-Instruct-Q8_0.gguf"
           xcodebuild test -scheme UniRTKit -destination "id=$SIM_UDID" \
             LIBRARY_SEARCH_PATHS="\$(inherited) $ROOT/build-ios/src $ROOT/build-ios/plugins/llama_cpp/src $ROOT/build-ios/bin" \
