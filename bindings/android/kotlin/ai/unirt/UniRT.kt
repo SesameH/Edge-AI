@@ -4,6 +4,7 @@
 package ai.unirt
 
 import ai.unirt.internal.NativeLlmSession
+import ai.unirt.internal.NativeVlmSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -40,6 +41,16 @@ object UniRT {
         nCtx: Int = 0,
         nGpuLayers: Int = -1,
     ): LlmSession = NativeLlmSession.open(modelPath, pluginId, deviceId, nCtx, nGpuLayers)
+
+    /** Load a multimodal model and return its session. */
+    suspend fun createVlmSession(
+        modelPath: String,
+        mmprojPath: String? = null,
+        pluginId: String = "llama_cpp",
+        deviceId: String? = null,
+        nCtx: Int = 0,
+        nGpuLayers: Int = -1,
+    ): VlmSession = NativeVlmSession.open(modelPath, mmprojPath, pluginId, deviceId, nCtx, nGpuLayers)
 
     private fun check(code: Int) {
         if (code < 0) {

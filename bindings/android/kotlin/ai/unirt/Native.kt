@@ -32,5 +32,26 @@ internal object Native {
     @JvmStatic external fun llmGenerate(
         handle: Long, prompt: String, maxTokens: Int, temperature: Float, topP: Float,
         topK: Int, seed: Int, onToken: TokenCallback?,
+    ): LlmGenerateResult?
+
+    @JvmStatic external fun vlmCreate(
+        modelPath: String, mmprojPath: String?, pluginId: String, deviceId: String?,
+        nCtx: Int, nGpuLayers: Int,
+    ): Long
+    @JvmStatic external fun vlmDestroy(handle: Long): Int
+    @JvmStatic external fun vlmReset(handle: Long): Int
+    @JvmStatic external fun vlmGetCapabilities(handle: Long): VlmCapabilities?
+    @JvmStatic external fun vlmApplyChatTemplate(
+        handle: Long,
+        roles: Array<String>,
+        contentTypes: Array<Array<String>>,
+        contentTexts: Array<Array<String>>,
+        enableThinking: Boolean,
+        grounding: Boolean,
     ): String?
+    @JvmStatic external fun vlmGenerate(
+        handle: Long, prompt: String, maxTokens: Int, temperature: Float, topP: Float,
+        topK: Int, seed: Int, imagePaths: Array<String>, audioPaths: Array<String>,
+        imageMaxLength: Int, onToken: TokenCallback?,
+    ): LlmGenerateResult?
 }

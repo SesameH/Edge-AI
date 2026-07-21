@@ -1,7 +1,7 @@
 # UniRT Android binding
 
-Kotlin + JNI layer over the UniRT C API. Text generation (llama_cpp / GGUF)
-only for now; VLM and embeddings follow the same pattern when needed.
+Kotlin + JNI layer over the UniRT C API. LLM (text) and VLM (multimodal)
+both via llama_cpp/GGUF; embeddings follow the same pattern when needed.
 
 ## Build the native libraries
 
@@ -39,7 +39,40 @@ UniRT.createLlmSession("/data/local/tmp/SmolLM2-135M-Instruct-Q8_0.gguf").use { 
     val prompt = session.applyChatTemplate(
         listOf(ChatMessage.user("What is the capital of France?"))
     )
-    session.stream(prompt).collect { piece -> print(piece) }   // cancel to stop decoding
+    session.stream(prompt).collect { event ->
+        when (event) {
+            is LlmStreamResult.Token -> print(event.text)                  // cancel to stop decoding
+            is LlmStreamResult.Completed -> println("\n${event.profile}")  // ttft, tok/s, stop reason
+            is LlmStreamResult.Error -> println("\ngeneration failed: ${event.cause}")
+        }
+    }
+}
+UniRT.stop()
+```
+
+`VlmSession` mirrors `LlmSession` — same threading contract, same
+`LlmStreamResult` stream events — but takes multimodal turns (`ContentPart.Text`/
+`Image`/`Audio`) and per-request media on `VlmGenerateOptions` instead of
+`GenerateOptions` (kept separate: image/audio fields would be dead weight on
+every LLM call):
+
+```kotlin
+UniRT.start()
+UniRT.createVlmSession(
+    modelPath = "/data/local/tmp/vision-model.gguf",
+    mmprojPath = "/data/local/tmp/mmproj.gguf",
+).use { session ->
+    val prompt = session.applyChatTemplate(
+        listOf(VlmChatMessage.user(
+            ContentPart.Text("What's in this image?"),
+            ContentPart.Image("/data/local/tmp/photo.jpg"),
+        ))
+    )
+    val reply = session.generate(
+        prompt,
+        VlmGenerateOptions(imagePaths = listOf("/data/local/tmp/photo.jpg")),
+    )
+    println(reply)
 }
 UniRT.stop()
 ```
@@ -49,5 +82,20 @@ Kotlin conventions over ceremony: default arguments instead of builders,
 interfaces.
 
 Models ship however the app prefers (assets, download at first run); pass an
-absolute filesystem path. CI cross-compiles this binding for arm64-v8a on
+absolute filesystem path. CI cross-compiles the native side for arm64-v8a on
 every push; on-device instrumentation tests are future work.
+
+## Verify the Kotlin sources
+
+`bindings/android` is also a plain Kotlin/JVM Gradle module (not an Android
+library — the sources have no `android.*` dependency, `System.loadLibrary`
+aside) so the Kotlin actually gets compiled and unit-tested by something,
+rather than only ever existing as loose files an app copies in:
+
+```sh
+cd bindings/android
+./gradlew build   # compiles kotlin/, runs test/ (fakes LlmSession/VlmSession —
+                   # anything touching Native itself needs a real device/emulator)
+```
+
+CI runs this on every push alongside the native NDK build.

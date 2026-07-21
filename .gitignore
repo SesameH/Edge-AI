@@ -6,6 +6,9 @@ sdk/pkg-unirt/
 target/
 compile_commands.json
 
+# Gradle local cache (bindings/android) — gradle/wrapper + gradlew are committed
+.gradle/
+
 # Test models (downloaded per README; hundreds of MB)
 models/
 

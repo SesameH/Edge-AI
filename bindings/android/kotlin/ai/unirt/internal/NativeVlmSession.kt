@@ -3,14 +3,17 @@
 
 package ai.unirt.internal
 
-import ai.unirt.ChatMessage
-import ai.unirt.GenerateOptions
 import ai.unirt.LlmGenerateResult
-import ai.unirt.LlmSession
 import ai.unirt.LlmStreamResult
 import ai.unirt.Native
 import ai.unirt.TokenCallback
 import ai.unirt.UniRTException
+import ai.unirt.VlmCapabilities
+import ai.unirt.VlmChatMessage
+import ai.unirt.VlmGenerateOptions
+import ai.unirt.VlmSession
+import ai.unirt.wireText
+import ai.unirt.wireType
 import java.util.concurrent.Executors
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -21,35 +24,35 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
 /**
- * The one [LlmSession] implementation, over the JNI surface. The native
- * handle is single-threaded by contract, so every native call is funnelled
- * through [dispatcher]; suspending members are therefore callable from any
- * coroutine without external locking.
+ * The one [VlmSession] implementation, over the JNI surface. Same shape as
+ * [NativeLlmSession]: the native handle is single-threaded by contract, so
+ * every native call is funnelled through [dispatcher].
  */
-internal class NativeLlmSession private constructor(
+internal class NativeVlmSession private constructor(
     private var handle: Long,
     private val dispatcher: ExecutorCoroutineDispatcher,
-) : LlmSession {
+) : VlmSession {
 
     companion object {
         suspend fun open(
             modelPath: String,
+            mmprojPath: String?,
             pluginId: String,
             deviceId: String?,
             nCtx: Int,
             nGpuLayers: Int,
-        ): NativeLlmSession {
+        ): NativeVlmSession {
             val dispatcher = Executors.newSingleThreadExecutor { runnable ->
-                Thread(runnable, "unirt-llm").apply { isDaemon = true }
+                Thread(runnable, "unirt-vlm").apply { isDaemon = true }
             }.asCoroutineDispatcher()
             val handle = withContext(dispatcher) {
-                Native.llmCreate(modelPath, pluginId, deviceId, nCtx, nGpuLayers)
+                Native.vlmCreate(modelPath, mmprojPath, pluginId, deviceId, nCtx, nGpuLayers)
             }
             if (handle == 0L) {
                 dispatcher.close()
                 throw UniRTException(-1, "cannot load $modelPath: ${Native.lastError()}")
             }
-            return NativeLlmSession(handle, dispatcher)
+            return NativeVlmSession(handle, dispatcher)
         }
     }
 
@@ -60,41 +63,45 @@ internal class NativeLlmSession private constructor(
 
     private fun raise(): Nothing = throw UniRTException(-1, Native.lastError())
 
-    /** Unpacks [GenerateOptions] into the native call once, instead of at
-     *  every call site — [Native.llmGenerate] itself stays flat/scalar since
-     *  that's what a JNI signature should be (an object parameter there would
-     *  mean unpacking it in C++ via GetFieldID by string name: no compile-time
-     *  check, easy to typo, no real win over the JVM marshalling primitives
-     *  directly). */
+    /** Unpacks [VlmGenerateOptions] into the native call once — see
+     *  NativeLlmSession.nativeGenerate for why Native.vlmGenerate itself
+     *  stays flat/scalar instead of taking an object across JNI. */
     private fun nativeGenerate(
         prompt: String,
-        options: GenerateOptions,
+        options: VlmGenerateOptions,
         onToken: TokenCallback?,
-    ): LlmGenerateResult = Native.llmGenerate(
+    ): LlmGenerateResult = Native.vlmGenerate(
         requireOpen(), prompt, options.maxTokens, options.temperature,
-        options.topP, options.topK, options.seed, onToken,
+        options.topP, options.topK, options.seed,
+        options.imagePaths.toTypedArray(), options.audioPaths.toTypedArray(),
+        options.imageMaxLength, onToken,
     ) ?: raise()
 
+    override suspend fun capabilities(): VlmCapabilities =
+        withContext(dispatcher) { Native.vlmGetCapabilities(requireOpen()) ?: raise() }
+
     override suspend fun applyChatTemplate(
-        messages: List<ChatMessage>,
-        addGenerationPrompt: Boolean,
+        messages: List<VlmChatMessage>,
+        enableThinking: Boolean,
+        grounding: Boolean,
     ): String = withContext(dispatcher) {
-        Native.llmApplyChatTemplate(
+        Native.vlmApplyChatTemplate(
             requireOpen(),
             messages.map { it.role }.toTypedArray(),
-            messages.map { it.content }.toTypedArray(),
-            addGenerationPrompt,
+            messages.map { m -> m.contents.map { it.wireType }.toTypedArray() }.toTypedArray(),
+            messages.map { m -> m.contents.map { it.wireText }.toTypedArray() }.toTypedArray(),
+            enableThinking,
+            grounding,
         ) ?: raise()
     }
 
-    override suspend fun generate(prompt: String, options: GenerateOptions): String =
+    override suspend fun generate(prompt: String, options: VlmGenerateOptions): String =
         withContext(dispatcher) { nativeGenerate(prompt, options, onToken = null).text }
 
-    // The C ABI has one callback (per token) and signals completion only by
-    // returning from the blocking call — there is no separate "done" hook.
-    // So Completed/Error are emitted here, after llmGenerate() itself returns,
-    // using its actual result — not from inside the token callback.
-    override fun stream(prompt: String, options: GenerateOptions): Flow<LlmStreamResult> =
+    // See NativeLlmSession.stream: Completed/Error are emitted after
+    // vlmGenerate() itself returns, using its real result — the C ABI has no
+    // separate "done" callback.
+    override fun stream(prompt: String, options: VlmGenerateOptions): Flow<LlmStreamResult> =
         channelFlow {
             withContext(dispatcher) {
                 try {
@@ -110,14 +117,14 @@ internal class NativeLlmSession private constructor(
         }
 
     override suspend fun reset() {
-        val status = withContext(dispatcher) { Native.llmReset(requireOpen()) }
+        val status = withContext(dispatcher) { Native.vlmReset(requireOpen()) }
         if (status < 0) throw UniRTException(status, Native.errorMessage(status))
     }
 
     override fun close() {
         if (handle == 0L) return
         runBlocking(dispatcher) {
-            Native.llmDestroy(handle)
+            Native.vlmDestroy(handle)
             handle = 0L
         }
         dispatcher.close()

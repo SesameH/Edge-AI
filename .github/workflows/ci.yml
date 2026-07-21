@@ -130,6 +130,13 @@ jobs:
         run: |
           ls -la build-android/libunirt_jni.so build-android/plugins/libunirt_plugin_llama_cpp.so
           find build-android -name "libunirt.so" | head -1
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build & test Kotlin binding (plain JVM module, no Android SDK needed)
+        run: ./gradlew build --console=plain
+        working-directory: bindings/android
 
   ios:
     name: iOS arm64 (simulator tests)

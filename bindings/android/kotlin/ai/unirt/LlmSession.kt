@@ -5,6 +5,29 @@ package ai.unirt
 
 import kotlinx.coroutines.flow.Flow
 
+/** Timing, throughput, and stop cause for one generate() call — mirrors the
+ *  Python binding's GenerationProfile (`unirt_ProfileData` subset it uses). */
+data class GenerationProfile(
+    val ttft: Long,
+    val promptTime: Long,
+    val decodeTime: Long,
+    val promptTokens: Long,
+    val generatedTokens: Long,
+    val prefillSpeed: Double,
+    val decodeSpeed: Double,
+    val stopReason: String,
+)
+
+/** Raw JNI result of one llmGenerate() call: the full text plus its profile. */
+data class LlmGenerateResult(val text: String, val profile: GenerationProfile)
+
+/** One event from [LlmSession.stream]. */
+sealed interface LlmStreamResult {
+    data class Token(val text: String) : LlmStreamResult
+    data class Completed(val profile: GenerationProfile) : LlmStreamResult
+    data class Error(val cause: UniRTException) : LlmStreamResult
+}
+
 data class ChatMessage(val role: String, val content: String) {
     companion object {
         fun user(content: String) = ChatMessage("user", content)
@@ -41,9 +64,11 @@ interface LlmSession : AutoCloseable {
     /** Generate to completion and return the full reply. */
     suspend fun generate(prompt: String, options: GenerateOptions = GenerateOptions()): String
 
-    /** Generate as a cold [Flow] of token pieces; cancelling the collector
-     *  stops decoding. Resending a growing transcript reuses the KV prefix. */
-    fun stream(prompt: String, options: GenerateOptions = GenerateOptions()): Flow<String>
+    /** Generate as a cold [Flow] of [LlmStreamResult]: zero or more [LlmStreamResult.Token]
+     *  followed by exactly one [LlmStreamResult.Completed] or [LlmStreamResult.Error].
+     *  Cancelling the collector stops decoding. Resending a growing transcript reuses
+     *  the KV prefix. */
+    fun stream(prompt: String, options: GenerateOptions = GenerateOptions()): Flow<LlmStreamResult>
 
     /** Drop the conversation state (KV cache and transcript). */
     suspend fun reset()
