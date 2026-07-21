@@ -5,12 +5,12 @@ import CUniRT
 
 /// Boxes a Swift closure behind an opaque pointer so it can ride as
 /// `user_data` through the C callback and back.
-private final class TokenRelay {
+final class TokenRelay {
     let onToken: (String) -> Bool
     init(onToken: @escaping (String) -> Bool) { self.onToken = onToken }
 }
 
-private func unirt_token_trampoline(
+func unirt_token_trampoline(
     _ token: UnsafePointer<CChar>?, _ userData: UnsafeMutableRawPointer?
 ) -> Bool {
     guard let userData else { return false }
@@ -178,14 +178,14 @@ public actor LlmSession {
 
 /// Runs `body` with `value` as a live C string pointer, or `nil` when
 /// `value` is `nil` — `String.withCString` has no nil-friendly overload.
-private func withOptionalCString<R>(_ value: String?, _ body: (UnsafePointer<CChar>?) -> R) -> R {
+func withOptionalCString<R>(_ value: String?, _ body: (UnsafePointer<CChar>?) -> R) -> R {
     guard let value else { return body(nil) }
     return value.withCString(body)
 }
 
 /// Runs `body` with an array of live C string pointers, one per element,
 /// all valid for the duration of the call.
-private func withCStringArray<R>(_ values: [String], _ body: ([UnsafePointer<CChar>?]) throws -> R) rethrows -> R {
+func withCStringArray<R>(_ values: [String], _ body: ([UnsafePointer<CChar>?]) throws -> R) rethrows -> R {
     func recurse(_ index: Int, _ acc: inout [UnsafePointer<CChar>?]) throws -> R {
         if index == values.count { return try body(acc) }
         return try values[index].withCString { ptr in

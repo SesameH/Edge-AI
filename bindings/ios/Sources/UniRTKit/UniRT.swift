@@ -62,4 +62,18 @@ public enum UniRT {
             modelPath: modelPath, pluginId: pluginId, deviceId: deviceId,
             nCtx: nCtx, nGpuLayers: nGpuLayers)
     }
+
+    /// Load a multimodal model and return its session.
+    public static func createVlmSession(
+        modelPath: String,
+        mmprojPath: String? = nil,
+        pluginId: String = "llama_cpp",
+        deviceId: String? = nil,
+        nCtx: Int32 = 0,
+        nGpuLayers: Int32 = -1
+    ) async throws -> VlmSession {
+        try await VlmSession.open(
+            modelPath: modelPath, mmprojPath: mmprojPath, pluginId: pluginId, deviceId: deviceId,
+            nCtx: nCtx, nGpuLayers: nGpuLayers)
+    }
 }
