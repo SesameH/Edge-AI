@@ -35,6 +35,12 @@ class VlmBackend {
         output->supports_audio  = false;
         return UNIRT_SUCCESS;
     }
+
+    /** Memory footprint of the loaded model. Default: unsupported, matching
+     *  LlmBackend's default for the same operation. */
+    virtual int32_t get_runtime_stats(unirt_VlmRuntimeStats*) {
+        return UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED;
+    }
 };
 
 }  // namespace unirt

@@ -39,6 +39,7 @@ from ._types import (
     unirt_VlmCreateInput,
     unirt_VlmGenerateInput,
     unirt_VlmGenerateOutput,
+    unirt_VlmRuntimeStats,
 )
 
 unirt_log_callback = CFUNCTYPE(None, c_int32, c_char_p)
@@ -147,6 +148,10 @@ _PROTOTYPES: dict[str, tuple[list[object], object]] = {
     ),
     'unirt_vlm_get_capabilities': (
         [c_void_p, POINTER(unirt_VlmCapabilities)],
+        c_int32,
+    ),
+    'unirt_vlm_get_runtime_stats': (
+        [c_void_p, POINTER(unirt_VlmRuntimeStats)],
         c_int32,
     ),
     'unirt_embedding_create': (

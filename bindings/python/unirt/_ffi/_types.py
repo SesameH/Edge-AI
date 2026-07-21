@@ -270,6 +270,16 @@ class unirt_VlmGenerateOutput(Structure):
     ]
 
 
+class unirt_VlmRuntimeStats(Structure):
+    _fields_ = [
+        ('model_bytes', c_int64),
+        ('kv_cache_bytes', c_int64),
+        ('device_peak_bytes', c_int64),
+        ('process_rss_bytes', c_int64),
+        ('device_name', c_char_p),
+    ]
+
+
 class unirt_EmbeddingCreateInput(Structure):
     _fields_ = [
         ('model_path', c_char_p),

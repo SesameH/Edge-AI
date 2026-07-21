@@ -40,6 +40,7 @@ class LlamaCppVlm final : public VlmBackend {
         const unirt_VlmGenerateInput* input,
         unirt_VlmGenerateOutput* output) override;
     int32_t get_capabilities(unirt_VlmCapabilities* output) override;
+    int32_t get_runtime_stats(unirt_VlmRuntimeStats* output) override;
 
    private:
     enum class MediaKind { image, audio };
@@ -57,6 +58,7 @@ class LlamaCppVlm final : public VlmBackend {
 
     std::vector<ggml_backend_dev_t> devices_;
     std::string                     chat_template_;
+    std::string                     device_name_ = "CPU";
     int32_t                         context_size_ = 0;
     int32_t                         batch_size_ = 0;
     llama_pos                       n_past_ = 0;

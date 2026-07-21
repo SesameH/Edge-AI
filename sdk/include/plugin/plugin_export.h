@@ -126,6 +126,7 @@ inline unirt_VlmTable* wrap(std::unique_ptr<VlmBackend> impl) noexcept {
         Holder, generate, const unirt_VlmGenerateInput*, unirt_VlmGenerateOutput*);
     t.get_capabilities    = UNIRT_PLUGIN_THUNK_1(Holder, get_capabilities, unirt_VlmCapabilities*);
     t.destroy             = [](void* self) noexcept { delete static_cast<Holder*>(self); };
+    t.get_runtime_stats   = UNIRT_PLUGIN_THUNK_1(Holder, get_runtime_stats, unirt_VlmRuntimeStats*);
     return &t;
 }
 

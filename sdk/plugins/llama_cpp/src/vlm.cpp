@@ -116,6 +116,7 @@ void LlamaCppVlm::clear_model() noexcept {
     vocab_ = nullptr;
     devices_.clear();
     chat_template_.clear();
+    device_name_ = "CPU";
     context_size_ = 0;
     batch_size_ = 0;
     n_past_ = 0;
@@ -249,13 +250,14 @@ int32_t LlamaCppVlm::create(const unirt_VlmCreateInput* input) {
     vocab_ = llama_model_get_vocab(model_.get());
     devices_ = std::move(selected_devices);
     chat_template_ = std::move(requested_template);
+    device_name_ = std::move(selected_device_name);
     context_size_ = actual_context;
     batch_size_ = actual_batch;
 
     UNIRT_LOG_INFO(
         "llama_cpp VLM: loaded model={}, mmproj={}, context={}, batch={}, device={}",
         input->model_path, input->mmproj_path, context_size_, batch_size_,
-        selected_device_name);
+        device_name_);
     return UNIRT_SUCCESS;
 }
 
@@ -274,6 +276,21 @@ int32_t LlamaCppVlm::get_capabilities(unirt_VlmCapabilities* output) {
     if (!output) return UNIRT_ERROR_COMMON_INVALID_INPUT;
     output->supports_vision = mtmd_support_vision(multimodal_.get());
     output->supports_audio = mtmd_support_audio(multimodal_.get());
+    return UNIRT_SUCCESS;
+}
+
+int32_t LlamaCppVlm::get_runtime_stats(unirt_VlmRuntimeStats* output) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!model_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
+    if (!output) return UNIRT_ERROR_COMMON_INVALID_INPUT;
+    // mtmd's public API has no projector-size accessor, so this covers only
+    // the text model's weights, same as the LLM backend — not the mmproj.
+    output->model_bytes = static_cast<int64_t>(llama_model_size(model_.get()));
+    output->kv_cache_bytes = context_
+                                  ? static_cast<int64_t>(llama_state_get_size(context_.get()))
+                                  : -1;
+    output->device_peak_bytes = -1;
+    output->device_name = device_name_.c_str();
     return UNIRT_SUCCESS;
 }
 

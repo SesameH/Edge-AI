@@ -78,6 +78,8 @@ typedef struct unirt_VlmTable {
     int32_t (*generate)(void* self, const unirt_VlmGenerateInput* input, unirt_VlmGenerateOutput* output);
     int32_t (*get_capabilities)(void* self, unirt_VlmCapabilities* output);
     void (*destroy)(void* self);
+    /* -- Appended fields (guarded by struct_size; never reorder above) -- */
+    int32_t (*get_runtime_stats)(void* self, unirt_VlmRuntimeStats* output);
 } unirt_VlmTable;
 
 /** Embedding encoder. */

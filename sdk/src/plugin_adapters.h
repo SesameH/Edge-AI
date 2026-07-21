@@ -33,6 +33,10 @@ template <>
 inline constexpr std::size_t kRequiredTableBytes<unirt_PluginTable> =
     offsetof(unirt_PluginTable, modalities);
 
+template <>
+inline constexpr std::size_t kRequiredTableBytes<unirt_VlmTable> =
+    offsetof(unirt_VlmTable, get_runtime_stats);
+
 template <typename Table>
 bool table_complete(const Table* table) noexcept {
     return table && table->struct_size >= kRequiredTableBytes<Table>;
@@ -113,6 +117,12 @@ class TableVlm final : public VlmBackend {
     int32_t get_capabilities(unirt_VlmCapabilities* output) override {
         if (t_->get_capabilities) return t_->get_capabilities(t_->self, output);
         return VlmBackend::get_capabilities(output);
+    }
+    int32_t get_runtime_stats(unirt_VlmRuntimeStats* output) override {
+        if (UNIRT_TABLE_HAS_FIELD(t_, get_runtime_stats) && t_->get_runtime_stats) {
+            return t_->get_runtime_stats(t_->self, output);
+        }
+        return UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED;
     }
 
    private:

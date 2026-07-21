@@ -56,6 +56,7 @@ from ._ffi._types import (
     unirt_VlmContent,
     unirt_VlmGenerateInput,
     unirt_VlmGenerateOutput,
+    unirt_VlmRuntimeStats,
     unirt_token_callback,
 )
 from .generation.output import GenerateOutput, GenerationProfile
@@ -767,6 +768,27 @@ class UniRTVLM(_NativeModel):
         return {
             'vision': bool(output.supports_vision),
             'audio': bool(output.supports_audio),
+        }
+
+    def runtime_stats(self) -> dict:
+        output = unirt_VlmRuntimeStats()
+        with self._op_lock:
+            self._require_open()
+            _check(
+                load_library().unirt_vlm_get_runtime_stats(
+                    self._handle,
+                    byref(output),
+                )
+            )
+        return {
+            'model_bytes': int(output.model_bytes),
+            'kv_cache_bytes': int(output.kv_cache_bytes),
+            'device_peak_bytes': int(output.device_peak_bytes),
+            'process_rss_bytes': int(output.process_rss_bytes),
+            'device_name': (
+                output.device_name.decode('utf-8', errors='replace')
+                if output.device_name else None
+            ),
         }
 
 

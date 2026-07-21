@@ -872,6 +872,28 @@ typedef struct {
 UNIRT_API int32_t unirt_vlm_generate(
     unirt_VLM* handle, const unirt_VlmGenerateInput* input, unirt_VlmGenerateOutput* output);
 
+/** Memory footprint of the loaded model. Byte fields are -1 when the plugin
+ *  cannot measure them; the bridge zero-initializes the rest. Same shape as
+ *  unirt_LlmRuntimeStats — kept as its own type since VLM's model_bytes may
+ *  need to cover the projector/encoder too, not just the text weights. */
+typedef struct {
+    int64_t model_bytes;       /** Bytes held by the weights (+ projector, if any). */
+    int64_t kv_cache_bytes;    /** Bytes held by KV cache / decode state. */
+    int64_t device_peak_bytes; /** Peak device (GPU/NPU) allocation since load. */
+    int64_t process_rss_bytes; /** Whole-process resident set; filled by the bridge. */
+    const char* device_name;   /** Active compute device; static string owned by the plugin. */
+} unirt_VlmRuntimeStats;
+
+/**
+ * @brief Memory usage of the loaded multimodal model — the VLM counterpart
+ *        of unirt_llm_get_runtime_stats(). Cheap; fine to call between
+ *        generations.
+ *
+ * @return UNIRT_SUCCESS, or UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED when the
+ *         plugin can report nothing at all.
+ */
+UNIRT_API int32_t unirt_vlm_get_runtime_stats(unirt_VLM* handle, unirt_VlmRuntimeStats* output);
+
 /* ========================================================================== */
 /*  Embedding — pre-tokenized encoder models                                 */
 /* ========================================================================== */

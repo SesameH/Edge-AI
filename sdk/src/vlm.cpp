@@ -4,6 +4,8 @@
 // unirt_vlm_* C entrypoints: argument validation plus forwarding to the
 // plugin's VlmBackend through the shared bridge machinery.
 
+#include <cstring>
+
 #include "bridge_support.h"
 #include "plugin/vlm_backend.h"
 
@@ -91,4 +93,19 @@ int32_t unirt_vlm_generate(
     return with_backend<VlmBackend>(
         "vlm.generate", handle, UNIRT_ERROR_COMMON_UNKNOWN,
         [&](VlmBackend& vlm) { return run_generation(vlm, input, output); });
+}
+
+int32_t unirt_vlm_get_runtime_stats(unirt_VLM* handle, unirt_VlmRuntimeStats* output) {
+    UNIRT_LOG_TRACE("vlm.get_runtime_stats");
+    if (!output) return UNIRT_ERROR_COMMON_INVALID_INPUT;
+    std::memset(output, 0, sizeof(*output));
+    output->model_bytes       = -1;
+    output->kv_cache_bytes    = -1;
+    output->device_peak_bytes = -1;
+    return with_backend<VlmBackend>(
+        "vlm.get_runtime_stats", handle, UNIRT_ERROR_COMMON_UNKNOWN, [&](VlmBackend& vlm) {
+            const int32_t rc          = vlm.get_runtime_stats(output);
+            output->process_rss_bytes = resident_set_bytes();
+            return rc;
+        });
 }
