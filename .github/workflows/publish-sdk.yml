@@ -138,6 +138,25 @@ jobs:
           git add -A
           git diff --cached --quiet || git commit -m "sync wrapper source from core ${{ github.ref_name }}"
           git push
+      - name: Assemble the real Android AAR (not raw .so files — see android/README.md)
+        run: |
+          set -e
+          mkdir -p unirt-sdk/android/prebuilt/arm64-v8a
+          tar -C unirt-sdk/android/prebuilt/arm64-v8a -xzf artifacts/unirt-android-native-arm64-v8a.tar.gz --strip-components=1
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build the AAR
+        run: ./gradlew assembleRelease --console=plain
+        working-directory: unirt-sdk/android
+      - name: Locate release assets
+        run: |
+          set -e
+          mkdir -p release-assets
+          cp "$(find unirt-sdk/android/build/outputs/aar -name '*.aar')" release-assets/unirt-android.aar
+          cp artifacts/unirt-python-native-macos-arm64.tar.gz release-assets/
+          cp artifacts/unirt-ios-xcframework.zip release-assets/
       - name: Create GitHub Release on unirt-sdk
         env:
           GH_TOKEN: ${{ secrets.UNIRT_SDK_PUSH_TOKEN }}
@@ -146,6 +165,6 @@ jobs:
             --repo "${{ env.UNIRT_SDK_REPO }}" \
             --title "${{ github.ref_name }}" \
             --notes "Prebuilt native libraries for UniRT ${{ github.ref_name }}. See README.md for install instructions per platform." \
-            artifacts/unirt-python-native-macos-arm64.tar.gz \
-            artifacts/unirt-android-native-arm64-v8a.tar.gz \
-            artifacts/unirt-ios-xcframework.zip
+            release-assets/unirt-python-native-macos-arm64.tar.gz \
+            release-assets/unirt-android.aar \
+            release-assets/unirt-ios-xcframework.zip
