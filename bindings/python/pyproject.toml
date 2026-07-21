@@ -28,5 +28,13 @@ unirt = "unirt.cli:main"
 [tool.setuptools.packages.find]
 include = ["unirt*"]
 
+[tool.setuptools.package-data]
+# Prebuilt native libraries (see unirt/_ffi/_lib.py's release layout:
+# unirt/lib/<main lib>, unirt/lib/<plugin id>/<plugin lib>). Not present
+# in a source checkout; populated from a unirt-sdk Release before
+# building/installing a wheel. Without this, setuptools only collects
+# .py files and pip silently drops every .dylib/.so/.dll.
+unirt = ["lib/*", "lib/*/*"]
+
 [tool.setuptools.dynamic]
 version = { attr = "unirt._version.__version__" }
