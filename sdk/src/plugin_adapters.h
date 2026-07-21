@@ -37,6 +37,10 @@ template <>
 inline constexpr std::size_t kRequiredTableBytes<unirt_VlmTable> =
     offsetof(unirt_VlmTable, get_runtime_stats);
 
+template <>
+inline constexpr std::size_t kRequiredTableBytes<unirt_EmbeddingTable> =
+    offsetof(unirt_EmbeddingTable, rerank);
+
 template <typename Table>
 bool table_complete(const Table* table) noexcept {
     return table && table->struct_size >= kRequiredTableBytes<Table>;
@@ -147,6 +151,10 @@ class TableEmbedding final : public EmbeddingBackend {
     int32_t get_runtime_stats(unirt_EmbeddingRuntimeStats* output) override {
         return t_->get_runtime_stats ? t_->get_runtime_stats(t_->self, output)
                                      : UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED;
+    }
+    int32_t rerank(const unirt_EmbeddingRerankInput* input, unirt_EmbeddingRerankOutput* output) override {
+        if (UNIRT_TABLE_HAS_FIELD(t_, rerank) && t_->rerank) return t_->rerank(t_->self, input, output);
+        return UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED;
     }
 
    private:

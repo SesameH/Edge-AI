@@ -958,6 +958,40 @@ UNIRT_API int32_t unirt_embedding_encode(
 UNIRT_API int32_t unirt_embedding_get_runtime_stats(
     unirt_Embedding* handle, unirt_EmbeddingRuntimeStats* output);
 
+/** One query scored against N candidate documents. Unlike
+ *  unirt_EmbeddingEncodeInput, this takes raw UTF-8 text rather than
+ *  pre-tokenized ids: cross-encoder reranking needs the model's own
+ *  tokenizer and (when present) a model-specific "rerank" prompt template
+ *  to assemble the query+document pair correctly, neither of which the
+ *  pre-tokenized ABI above can express. Supported only by backends whose
+ *  loaded model has a classifier head (GGUF rerankers via llama_cpp);
+ *  others report UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED. */
+typedef struct {
+    const char*        query_utf8;
+    const char* const* documents_utf8;
+    int32_t            document_count;
+} unirt_EmbeddingRerankInput;
+
+/** One relevance score per document, same order as the request. Release
+ *  scores with unirt_free(). */
+typedef struct {
+    float*  scores;
+    int32_t score_count;
+} unirt_EmbeddingRerankOutput;
+
+/**
+ * @brief Score a query against each candidate document with the loaded
+ *        model's cross-encoder/classifier head (llama.cpp's
+ *        LLAMA_POOLING_TYPE_RANK) — higher is more relevant; the caller
+ *        sorts.
+ *
+ * @return UNIRT_SUCCESS, UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED when the
+ *         loaded model has no classifier head, or a common validation code.
+ */
+UNIRT_API int32_t unirt_embedding_rerank(
+    unirt_Embedding* handle, const unirt_EmbeddingRerankInput* input,
+    unirt_EmbeddingRerankOutput* output);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

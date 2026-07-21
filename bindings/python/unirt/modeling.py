@@ -36,6 +36,8 @@ from ._ffi._api import (
 from ._ffi._types import (
     unirt_EmbeddingEncodeInput,
     unirt_EmbeddingEncodeOutput,
+    unirt_EmbeddingRerankInput,
+    unirt_EmbeddingRerankOutput,
     unirt_EmbeddingRuntimeStats,
     unirt_GenerationConfig,
     unirt_KvCacheLoadInput,
@@ -798,7 +800,7 @@ class UniRTEmbedding:
     def __init__(
         self,
         handle: c_void_p,
-        tokenizer_path: str,
+        tokenizer_path: str | None,
         *,
         max_length: int,
         padding_side: str = 'right',
@@ -808,17 +810,19 @@ class UniRTEmbedding:
             raise ValueError('max_length must be a positive int32 value')
         if padding_side not in {'left', 'right'}:
             raise ValueError("padding_side must be 'left' or 'right'")
-        try:
-            tokenizer = Tokenizer.from_file(tokenizer_path)
-        except Exception:
-            # Do not leak a native model when tokenizer construction fails.
-            load_library().unirt_embedding_destroy(handle)
-            raise
+        tokenizer = None
+        if tokenizer_path is not None:
+            try:
+                tokenizer = Tokenizer.from_file(tokenizer_path)
+            except Exception:
+                # Do not leak a native model when tokenizer construction fails.
+                load_library().unirt_embedding_destroy(handle)
+                raise
 
-        padding = tokenizer.padding or {}
+        padding = tokenizer.padding or {} if tokenizer else {}
         pad_id = padding.get('pad_id')
         pad_token = padding.get('pad_token')
-        if pad_id is None:
+        if tokenizer and pad_id is None:
             for candidate in ('[PAD]', '<pad>', '<|pad|>'):
                 candidate_id = tokenizer.token_to_id(candidate)
                 if candidate_id is not None:
@@ -827,6 +831,8 @@ class UniRTEmbedding:
                     break
 
         self._handle = handle
+        # None for rerank()-only use (unirt_embedding_rerank tokenizes
+        # natively via the GGUF's own vocab); encode()/__call__ require one.
         self._tokenizer = tokenizer
         self._pad_id = int(pad_id) if pad_id is not None else None
         self._pad_token = pad_token
@@ -863,6 +869,10 @@ class UniRTEmbedding:
         return values, scalar
 
     def _tokenize(self, texts: list[str]) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
+        if self._tokenizer is None:
+            raise RuntimeError(
+                'this model was opened without a tokenizer (rerank()-only); encode() needs one'
+            )
         self._tokenizer.no_padding()
         self._tokenizer.enable_truncation(max_length=self._max_length)
         encodings = self._tokenizer.encode_batch(texts, add_special_tokens=True)
@@ -989,6 +999,41 @@ class UniRTEmbedding:
         return embeddings[0] if scalar else embeddings
 
     __call__ = encode
+
+    def rerank(self, query: str, documents: list[str]) -> list[float]:
+        """Score `documents` against `query` with the loaded model's
+        classifier/rerank head — higher is more relevant. Unlike encode(),
+        this takes raw text directly (the native side needs the model's own
+        tokenizer and, when present, a model-specific rerank prompt
+        template, neither reachable through the pre-tokenized encode() ABI).
+        Raises UniRTError(PARAM_NOT_SUPPORTED) if the loaded model has no
+        classifier head.
+        """
+        if not isinstance(query, str) or not query:
+            raise ValueError('query must be a non-empty string')
+        query_bytes = _enc(query)
+        docs_array, doc_count = _str_list_to_c(documents)
+        if doc_count == 0:
+            raise ValueError('documents must be a non-empty list of strings')
+
+        input_value = unirt_EmbeddingRerankInput(
+            query_utf8=query_bytes,
+            documents_utf8=docs_array,
+            document_count=doc_count,
+        )
+        output = unirt_EmbeddingRerankOutput()
+        library = load_library()
+        with self._op_lock:
+            self._require_open()
+            status = library.unirt_embedding_rerank(self._handle, byref(input_value), byref(output))
+            try:
+                _check(status)
+                if output.score_count != doc_count:
+                    raise RuntimeError('native rerank output has an invalid shape')
+                return [float(output.scores[i]) for i in range(doc_count)]
+            finally:
+                if output.scores:
+                    library.unirt_free(cast(output.scores, c_void_p))
 
     def runtime_stats(self) -> dict:
         output = unirt_EmbeddingRuntimeStats()

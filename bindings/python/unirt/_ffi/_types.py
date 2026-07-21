@@ -318,4 +318,19 @@ class unirt_EmbeddingRuntimeStats(Structure):
     ]
 
 
+class unirt_EmbeddingRerankInput(Structure):
+    _fields_ = [
+        ('query_utf8', c_char_p),
+        ('documents_utf8', POINTER(c_char_p)),
+        ('document_count', c_int32),
+    ]
+
+
+class unirt_EmbeddingRerankOutput(Structure):
+    _fields_ = [
+        ('scores', POINTER(c_float)),
+        ('score_count', c_int32),
+    ]
+
+
 __all__ = [name for name in globals() if name.startswith('unirt_')]

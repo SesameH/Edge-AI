@@ -16,6 +16,8 @@ from ._types import (
     unirt_EmbeddingCreateInput,
     unirt_EmbeddingEncodeInput,
     unirt_EmbeddingEncodeOutput,
+    unirt_EmbeddingRerankInput,
+    unirt_EmbeddingRerankOutput,
     unirt_EmbeddingRuntimeStats,
     unirt_GetDeviceListInput,
     unirt_GetDeviceListOutput,
@@ -165,6 +167,10 @@ _PROTOTYPES: dict[str, tuple[list[object], object]] = {
     ),
     'unirt_embedding_get_runtime_stats': (
         [c_void_p, POINTER(unirt_EmbeddingRuntimeStats)],
+        c_int32,
+    ),
+    'unirt_embedding_rerank': (
+        [c_void_p, POINTER(unirt_EmbeddingRerankInput), POINTER(unirt_EmbeddingRerankOutput)],
         c_int32,
     ),
 }

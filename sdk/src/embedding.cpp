@@ -30,6 +30,17 @@ bool encode_input_sane(const unirt_EmbeddingEncodeInput *input) noexcept {
   return batch <= std::numeric_limits<size_t>::max() / width;
 }
 
+bool rerank_input_sane(const unirt_EmbeddingRerankInput *input) noexcept {
+  if (!input || !input->query_utf8 || !input->query_utf8[0] ||
+      !input->documents_utf8 || input->document_count <= 0) {
+    return false;
+  }
+  for (int32_t i = 0; i < input->document_count; ++i) {
+    if (!input->documents_utf8[i] || !input->documents_utf8[i][0]) return false;
+  }
+  return true;
+}
+
 } // namespace
 
 int32_t unirt_embedding_create(const unirt_EmbeddingCreateInput *input,
@@ -78,4 +89,18 @@ int32_t unirt_embedding_get_runtime_stats(unirt_Embedding *handle,
         output->process_rss_bytes = resident_set_bytes();
         return rc;
       });
+}
+
+int32_t unirt_embedding_rerank(unirt_Embedding *handle,
+                               const unirt_EmbeddingRerankInput *input,
+                               unirt_EmbeddingRerankOutput *output) {
+  if (!output)
+    return UNIRT_ERROR_COMMON_INVALID_INPUT;
+  *output = {};
+  if (!rerank_input_sane(input))
+    return UNIRT_ERROR_COMMON_INVALID_INPUT;
+  UNIRT_LOG_TRACE("embedding.rerank");
+  return with_backend<EmbeddingBackend>(
+      "embedding.rerank", handle, UNIRT_ERROR_EMBEDDING_INFERENCE_FAILED,
+      [&](EmbeddingBackend &model) { return model.rerank(input, output); });
 }

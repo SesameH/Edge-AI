@@ -84,6 +84,13 @@ mkdir -p models/all-MiniLM-L6-v2-GGUF && cd models/all-MiniLM-L6-v2-GGUF && \
   for f in tokenizer.json tokenizer_config.json sentence_bert_config.json; do \
     curl -sLO "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/$f"; done && cd ../..
 
+# 5c. optional: a GGUF reranker model (llama_cpp's LLAMA_POOLING_TYPE_RANK;
+#     no tokenizer.json needed — rerank() tokenizes natively via the GGUF's
+#     own vocab)
+mkdir -p models/bge-reranker-v2-m3-GGUF && cd models/bge-reranker-v2-m3-GGUF && \
+  curl -sL -O "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q8_0.gguf" \
+  && cd ../..
+
 # 6. chat (the example bootstraps the source-tree binding automatically)
 python3 examples/chat.py \
     --backend llama_cpp --model models/SmolLM2-135M-Instruct-Q8_0.gguf

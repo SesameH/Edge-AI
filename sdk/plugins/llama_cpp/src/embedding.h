@@ -4,6 +4,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include <llama.h>
 
@@ -31,6 +32,7 @@ class LlamaCppEmbedding final : public EmbeddingBackend {
     int32_t create(const unirt_EmbeddingCreateInput* input) override;
     int32_t encode(const unirt_EmbeddingEncodeInput* input, unirt_EmbeddingEncodeOutput* output) override;
     int32_t get_runtime_stats(unirt_EmbeddingRuntimeStats* output) override;
+    int32_t rerank(const unirt_EmbeddingRerankInput* input, unirt_EmbeddingRerankOutput* output) override;
 
    private:
     /** (Re)build the llama_context when the current one is missing or too
@@ -40,10 +42,26 @@ class LlamaCppEmbedding final : public EmbeddingBackend {
      *  n_ctx gets rounded down internally and breaks the reserve graph). */
     int32_t ensure_session(int32_t row_capacity, int32_t sequence_count);
 
+    /** Same idea, but for rerank(): always LLAMA_POOLING_TYPE_RANK
+     *  regardless of the pooling this instance was created with, so it
+     *  needs its own context rather than reusing session_. */
+    int32_t ensure_rerank_session(int32_t row_capacity, int32_t sequence_count);
+
+    /** Tokenize one (query, document) pair into a single sequence: the
+     *  model's own "rerank" chat template if it has one, otherwise
+     *  BOS + query + EOS/SEP + document + EOS (mirrors llama.cpp's own
+     *  tools/server rerank formatting — that logic isn't public API, so
+     *  it's re-implemented here against llama_tokenize/llama_vocab_*). */
+    std::vector<llama_token> tokenize_rerank_pair(
+        const std::string& query, const std::string& document) const;
+
     ModelPtr    encoder_;
     ContextPtr  session_;
     int32_t     session_capacity_tokens_ = 0;
     int32_t     session_capacity_seqs_   = 0;
+    ContextPtr  rerank_session_;
+    int32_t     rerank_session_capacity_tokens_ = 0;
+    int32_t     rerank_session_capacity_seqs_   = 0;
     enum llama_pooling_type pooling_     = LLAMA_POOLING_TYPE_UNSPECIFIED;
     bool        normalize_               = false;
     int32_t     max_row_tokens_          = 0;  // model's trained context

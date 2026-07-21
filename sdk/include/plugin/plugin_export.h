@@ -146,6 +146,8 @@ inline unirt_EmbeddingTable* wrap(std::unique_ptr<EmbeddingBackend> impl) noexce
     t.get_runtime_stats     = UNIRT_PLUGIN_THUNK_1(
         Holder, get_runtime_stats, unirt_EmbeddingRuntimeStats*);
     t.destroy               = [](void* self) noexcept { delete static_cast<Holder*>(self); };
+    t.rerank                = UNIRT_PLUGIN_THUNK_2(
+        Holder, rerank, const unirt_EmbeddingRerankInput*, unirt_EmbeddingRerankOutput*);
     return &t;
 }
 

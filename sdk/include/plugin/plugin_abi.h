@@ -90,6 +90,8 @@ typedef struct unirt_EmbeddingTable {
     int32_t (*encode)(void* self, const unirt_EmbeddingEncodeInput* input, unirt_EmbeddingEncodeOutput* output);
     int32_t (*get_runtime_stats)(void* self, unirt_EmbeddingRuntimeStats* output);
     void (*destroy)(void* self);
+    /* -- Appended fields (guarded by struct_size; never reorder above) -- */
+    int32_t (*rerank)(void* self, const unirt_EmbeddingRerankInput* input, unirt_EmbeddingRerankOutput* output);
 } unirt_EmbeddingTable;
 
 /** The package: identity/devices plus factories for the modalities the

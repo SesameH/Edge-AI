@@ -86,6 +86,9 @@ int32_t LlamaCppEmbedding::create(const unirt_EmbeddingCreateInput* input) {
     session_.reset();
     session_capacity_tokens_ = 0;
     session_capacity_seqs_   = 0;
+    rerank_session_.reset();
+    rerank_session_capacity_tokens_ = 0;
+    rerank_session_capacity_seqs_   = 0;
 
     UNIRT_LOG_INFO(
         "llama_cpp embedding: loaded {} (width {}, max tokens {})", input->model_path,
@@ -122,6 +125,84 @@ int32_t LlamaCppEmbedding::ensure_session(int32_t row_capacity, int32_t sequence
     session_capacity_tokens_ = row_capacity;
     session_capacity_seqs_   = sequence_count;
     return UNIRT_SUCCESS;
+}
+
+int32_t LlamaCppEmbedding::ensure_rerank_session(int32_t row_capacity, int32_t sequence_count) {
+    if (rerank_session_ && rerank_session_capacity_tokens_ >= row_capacity &&
+        rerank_session_capacity_seqs_ >= sequence_count) {
+        return UNIRT_SUCCESS;
+    }
+    const auto span = static_cast<uint32_t>(row_capacity) * static_cast<uint32_t>(sequence_count);
+    llama_context_params params = llama_context_default_params();
+    params.n_ctx        = span;
+    params.n_batch      = span;
+    params.n_ubatch     = span;
+    params.n_seq_max    = static_cast<uint32_t>(sequence_count);
+    params.embeddings   = true;
+    params.pooling_type = LLAMA_POOLING_TYPE_RANK;
+
+    rerank_session_.reset(llama_init_from_model(encoder_.get(), params));
+    if (!rerank_session_) {
+        UNIRT_LOG_ERROR(
+            "llama_cpp embedding: cannot create a rerank context for {} x {} tokens", sequence_count,
+            row_capacity);
+        rerank_session_capacity_tokens_ = 0;
+        rerank_session_capacity_seqs_   = 0;
+        return UNIRT_ERROR_EMBEDDING_INFERENCE_FAILED;
+    }
+    rerank_session_capacity_tokens_ = row_capacity;
+    rerank_session_capacity_seqs_   = sequence_count;
+    return UNIRT_SUCCESS;
+}
+
+namespace {
+std::vector<llama_token> tokenize_text(
+    const llama_vocab* vocab, const std::string& text, bool add_special, bool parse_special) {
+    const int32_t needed = -llama_tokenize(
+        vocab, text.c_str(), static_cast<int32_t>(text.size()), nullptr, 0, add_special, parse_special);
+    if (needed <= 0) return {};
+    std::vector<llama_token> tokens(static_cast<size_t>(needed));
+    const int32_t got = llama_tokenize(
+        vocab, text.c_str(), static_cast<int32_t>(text.size()), tokens.data(), needed, add_special,
+        parse_special);
+    tokens.resize(static_cast<size_t>(got > 0 ? got : 0));
+    return tokens;
+}
+
+void replace_all(std::string& text, const std::string& from, const std::string& to) {
+    if (from.empty()) return;
+    size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::string::npos) {
+        text.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+}  // namespace
+
+std::vector<llama_token> LlamaCppEmbedding::tokenize_rerank_pair(
+    const std::string& query, const std::string& document) const {
+    const llama_vocab* vocab            = llama_model_get_vocab(encoder_.get());
+    const char*         rerank_template = llama_model_chat_template(encoder_.get(), "rerank");
+
+    if (rerank_template) {
+        std::string prompt = rerank_template;
+        replace_all(prompt, "{query}", query);
+        replace_all(prompt, "{document}", document);
+        return tokenize_text(vocab, prompt, /*add_special=*/true, /*parse_special=*/true);
+    }
+
+    std::vector<llama_token> tokens;
+    llama_token eos = llama_vocab_eos(vocab);
+    if (eos == LLAMA_TOKEN_NULL) eos = llama_vocab_sep(vocab);
+    if (llama_vocab_get_add_bos(vocab)) tokens.push_back(llama_vocab_bos(vocab));
+    auto query_tokens = tokenize_text(vocab, query, false, false);
+    tokens.insert(tokens.end(), query_tokens.begin(), query_tokens.end());
+    if (llama_vocab_get_add_eos(vocab) && eos != LLAMA_TOKEN_NULL) tokens.push_back(eos);
+    if (llama_vocab_get_add_sep(vocab)) tokens.push_back(llama_vocab_sep(vocab));
+    auto doc_tokens = tokenize_text(vocab, document, false, false);
+    tokens.insert(tokens.end(), doc_tokens.begin(), doc_tokens.end());
+    if (llama_vocab_get_add_eos(vocab) && eos != LLAMA_TOKEN_NULL) tokens.push_back(eos);
+    return tokens;
 }
 
 int32_t LlamaCppEmbedding::encode(
@@ -261,6 +342,89 @@ int32_t LlamaCppEmbedding::get_runtime_stats(unirt_EmbeddingRuntimeStats* output
     output->process_rss_bytes = -1;
     output->device_name       = device_label_.c_str();
     if (encoder_) output->model_bytes = static_cast<int64_t>(llama_model_size(encoder_.get()));
+    return UNIRT_SUCCESS;
+}
+
+int32_t LlamaCppEmbedding::rerank(
+    const unirt_EmbeddingRerankInput* input, unirt_EmbeddingRerankOutput* output) {
+    if (output) *output = {};
+    if (!encoder_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
+    if (!output || !input || !input->query_utf8 || !input->documents_utf8 ||
+        input->document_count <= 0) {
+        return UNIRT_ERROR_COMMON_INVALID_INPUT;
+    }
+    const uint32_t n_cls_out = llama_model_n_cls_out(encoder_.get());
+    if (n_cls_out != 1) {
+        UNIRT_LOG_ERROR(
+            "llama_cpp embedding: model reports {} classifier outputs; rerank only supports "
+            "exactly 1 (no classifier head means this model cannot rerank at all)",
+            n_cls_out);
+        return UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED;
+    }
+
+    const std::string                     query(input->query_utf8);
+    std::vector<std::vector<llama_token>> rows(static_cast<size_t>(input->document_count));
+    int32_t total_tokens = 0;
+    int32_t longest_row  = 0;
+    for (int32_t i = 0; i < input->document_count; ++i) {
+        if (!input->documents_utf8[i]) return UNIRT_ERROR_COMMON_INVALID_INPUT;
+        rows[static_cast<size_t>(i)] = tokenize_rerank_pair(query, input->documents_utf8[i]);
+        const auto& tokens           = rows[static_cast<size_t>(i)];
+        if (tokens.empty()) {
+            UNIRT_LOG_ERROR("llama_cpp embedding: rerank pair {} tokenized to zero tokens", i);
+            return UNIRT_ERROR_COMMON_INVALID_INPUT;
+        }
+        if (max_row_tokens_ > 0 && static_cast<int32_t>(tokens.size()) > max_row_tokens_) {
+            UNIRT_LOG_ERROR(
+                "llama_cpp embedding: rerank pair {} has {} tokens, model was trained for {}", i,
+                tokens.size(), max_row_tokens_);
+            return UNIRT_ERROR_COMMON_INVALID_INPUT;
+        }
+        total_tokens += static_cast<int32_t>(tokens.size());
+        longest_row = std::max(longest_row, static_cast<int32_t>(tokens.size()));
+    }
+
+    const int32_t rc = ensure_rerank_session(longest_row, input->document_count);
+    if (rc != UNIRT_SUCCESS) return rc;
+    llama_memory_clear(llama_get_memory(rerank_session_.get()), true);
+
+    BatchGuard   guard(total_tokens);
+    llama_batch& batch = guard.batch;
+    for (size_t row = 0; row < rows.size(); ++row) {
+        for (size_t position = 0; position < rows[row].size(); ++position) {
+            const int32_t cursor    = batch.n_tokens++;
+            batch.token[cursor]     = rows[row][position];
+            batch.pos[cursor]       = static_cast<llama_pos>(position);
+            batch.n_seq_id[cursor]  = 1;
+            batch.seq_id[cursor][0] = static_cast<llama_seq_id>(row);
+            batch.logits[cursor]    = true;
+        }
+    }
+
+    const bool encoder_only =
+        llama_model_has_encoder(encoder_.get()) && !llama_model_has_decoder(encoder_.get());
+    const int32_t status = encoder_only ? llama_encode(rerank_session_.get(), batch)
+                                        : llama_decode(rerank_session_.get(), batch);
+    if (status != 0) {
+        UNIRT_LOG_ERROR("llama_cpp embedding: rerank inference failed with status {}", status);
+        return UNIRT_ERROR_EMBEDDING_INFERENCE_FAILED;
+    }
+
+    auto* scores = static_cast<float*>(
+        std::malloc(sizeof(float) * static_cast<size_t>(input->document_count)));
+    if (!scores) return UNIRT_ERROR_COMMON_MEMORY_ALLOCATION;
+    for (int32_t row = 0; row < input->document_count; ++row) {
+        const float* vector = llama_get_embeddings_seq(rerank_session_.get(), row);
+        if (!vector) {
+            std::free(scores);
+            UNIRT_LOG_ERROR("llama_cpp embedding: model produced no rank score for document {}", row);
+            return UNIRT_ERROR_EMBEDDING_OUTPUT_INVALID;
+        }
+        scores[row] = vector[0];
+    }
+
+    output->scores      = scores;
+    output->score_count = input->document_count;
     return UNIRT_SUCCESS;
 }
 

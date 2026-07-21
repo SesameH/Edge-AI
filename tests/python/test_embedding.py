@@ -170,3 +170,52 @@ def test_gguf_embedding_end_to_end(sdk):
         assert related > unrelated + 0.3
     finally:
         model.close()
+
+
+def test_gguf_rerank_end_to_end(sdk):
+    from ctypes import byref, c_void_p
+
+    from conftest import REPO_ROOT
+
+    from unirt._ffi._api import load_library, _check
+    from unirt._ffi._types import unirt_EmbeddingCreateInput
+
+    model_path = os.path.join(
+        REPO_ROOT, 'models', 'bge-reranker-v2-m3-GGUF', 'bge-reranker-v2-m3-Q8_0.gguf'
+    )
+    if not os.path.isfile(model_path):
+        pytest.skip('GGUF reranker model not downloaded (see README)')
+    if 'llama_cpp' not in sdk.get_runtime_list():
+        pytest.skip('llama_cpp plugin is unavailable')
+
+    library = load_library()
+    create_input = unirt_EmbeddingCreateInput(
+        model_path=model_path.encode('utf-8'),
+        plugin_id=b'llama_cpp',
+        device_id=None,
+        pooling=0,
+        normalize=False,
+        output_name=None,
+    )
+    handle = c_void_p()
+    _check(library.unirt_embedding_create(byref(create_input), byref(handle)))
+
+    # No tokenizer.json needed: unirt_embedding_rerank tokenizes natively
+    # via the GGUF's own vocab (and the model's own "rerank" chat template,
+    # if it has one), unlike encode() which needs a Python-side tokenizer.
+    model = UniRTEmbedding(handle, None, max_length=512)
+    try:
+        scores = model.rerank(
+            'What is the capital of France?',
+            [
+                'Paris is the capital and most populous city of France.',
+                'The kangaroo is a marsupial native to Australia.',
+            ],
+        )
+        assert len(scores) == 2
+        assert scores[0] > scores[1]  # the actually-relevant document ranks higher
+
+        with pytest.raises(RuntimeError, match='needs one'):
+            model.encode('this requires a tokenizer, which this handle has none of')
+    finally:
+        model.close()

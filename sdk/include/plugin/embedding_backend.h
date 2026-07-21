@@ -23,6 +23,13 @@ public:
   virtual int32_t get_runtime_stats(unirt_EmbeddingRuntimeStats *) {
     return UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED;
   }
+
+  /** Score a query against candidate documents with a classifier/rerank
+   *  head. Default: unsupported, for backends/models without one. */
+  virtual int32_t rerank(const unirt_EmbeddingRerankInput *,
+                         unirt_EmbeddingRerankOutput *) {
+    return UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED;
+  }
 };
 
 } // namespace unirt
