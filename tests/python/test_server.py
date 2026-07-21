@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 import threading
@@ -155,7 +156,7 @@ def test_server_main_accepts_hf_vlm_and_does_not_request_llm_stats(monkeypatch, 
     monkeypatch.setattr(
         server,
         'serve',
-        lambda current, model_id, host, port: served.append(
+        lambda current, model_id, host, port, max_queued_requests=8: served.append(
             (current, model_id, host, port)
         ),
     )
@@ -204,6 +205,39 @@ def test_cors_headers_for_browser_clients():
             listing.read()
             assert listing.status == 200
             assert listing.getheader('Access-Control-Allow-Origin') == '*'
+        finally:
+            connection.close()
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+
+
+def test_server_sheds_load_with_503_when_request_slots_exhausted():
+    """Generation is serialized behind one lock; request_slots bounds the
+    queue so a burst gets a fast 503 instead of piling up blocked threads."""
+    import http.client
+
+    httpd = server.UniRTHTTPServer(
+        ('127.0.0.1', 0), FakeModel(), 'fake-model', max_queued_requests=1
+    )
+    httpd.request_slots.acquire()  # simulate the one slot already in flight
+    port = httpd.server_address[1]
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            body = json.dumps({'messages': [{'role': 'user', 'content': 'hi'}]}).encode()
+            connection.request(
+                'POST', '/v1/chat/completions', body=body,
+                headers={'Content-Type': 'application/json', 'Content-Length': str(len(body))},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read())
+            assert response.status == 503
+            assert response.getheader('Retry-After') == '1'
+            assert payload['error']['type'] == 'server_error'
         finally:
             connection.close()
     finally:

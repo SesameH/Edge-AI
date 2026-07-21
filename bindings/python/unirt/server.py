@@ -250,10 +250,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 
-    def _json(self, code: int, payload: dict) -> None:
+    def _json(
+        self, code: int, payload: dict, *, extra_headers: dict[str, str] | None = None
+    ) -> None:
         body = json.dumps(payload).encode()
         self.send_response(code)
         self._cors()
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -262,6 +266,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _error(self, code: int, message: str) -> None:
         self._json(code, {'error': {'message': message, 'type': 'invalid_request_error'}})
+
+    def _busy(self) -> None:
+        # Generation is serialized behind one model/lock; request_slots bounds
+        # how many callers may be queued waiting for it so load sheds with a
+        # clear signal instead of piling up unbounded blocked threads.
+        self._json(
+            503,
+            {'error': {
+                'message': 'server is busy handling other requests; retry shortly',
+                'type': 'server_error',
+            }},
+            extra_headers={'Retry-After': '1'},
+        )
 
     # ---- routes ----
 
@@ -320,6 +337,11 @@ class Handler(BaseHTTPRequestHandler):
             self._error(400, str(exc))
             return
 
+        if not self.server.request_slots.acquire(blocking=False):
+            self._busy()
+            prepared.cleanup()
+            return
+
         model = self.server.model
         try:
             # Generation mutates KV state; serialize and bracket every request
@@ -348,6 +370,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.close_connection = True
         finally:
+            self.server.request_slots.release()
             prepared.cleanup()
 
     # ---- completion modes ----
@@ -426,18 +449,25 @@ class UniRTHTTPServer(ThreadingHTTPServer):
     block_on_close = True
     allow_reuse_address = True
 
-    def __init__(self, address, model, model_id: str):
+    def __init__(self, address, model, model_id: str, max_queued_requests: int = 8):
         self.model = model
         self.model_id = model_id
         self.capabilities = model.capabilities() if isinstance(model, UniRTVLM) else None
         self.gen_lock = threading.Lock()
+        # Generation itself is fully serialized by gen_lock (one model, one KV
+        # state); this only bounds how many callers may be queued waiting for
+        # it, so a burst sheds load with 503s instead of piling up unbounded
+        # blocked threads.
+        self.request_slots = threading.Semaphore(max_queued_requests)
         super().__init__(address, Handler)
 
 
-def serve(model, model_id: str, host: str, port: int) -> None:
+def serve(
+    model, model_id: str, host: str, port: int, max_queued_requests: int = 8
+) -> None:
     """Serve until interrupted, then stop accepting and join active requests."""
 
-    server = UniRTHTTPServer((host, port), model, model_id)
+    server = UniRTHTTPServer((host, port), model, model_id, max_queued_requests)
     previous_handlers: dict[int, object] = {}
 
     def request_shutdown(_signum, _frame):
@@ -480,9 +510,18 @@ def main() -> None:
         default=0,
         help='context window in tokens (0 = the model default)',
     )
+    ap.add_argument(
+        '--max-queued-requests',
+        type=int,
+        default=8,
+        help='requests may queue waiting for the (serialized) model before '
+             'the server starts returning 503 (default: 8)',
+    )
     args = ap.parse_args()
     if args.n_ctx < 0:
         ap.error('--n-ctx must be >= 0')
+    if args.max_queued_requests < 1:
+        ap.error('--max-queued-requests must be >= 1')
 
     model_source = os.path.abspath(args.model) if os.path.exists(args.model) else args.model
     model_id = os.path.splitext(os.path.basename(args.model.rstrip('/')))[0]
@@ -500,7 +539,7 @@ def main() -> None:
             stats = model.runtime_stats()
             details = f"device: {stats['device_name'] or '?'}"
         print(f'ready on http://{args.host}:{args.port}/v1  ({details})')
-        serve(model, model_id, args.host, args.port)
+        serve(model, model_id, args.host, args.port, args.max_queued_requests)
     finally:
         model.close()
 
