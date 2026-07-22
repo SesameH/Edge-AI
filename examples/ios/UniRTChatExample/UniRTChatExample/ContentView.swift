@@ -55,6 +55,7 @@ struct ContentView: View {
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(Theme.dim)
                         .lineLimit(1)
+                        .accessibilityIdentifier("modelNameText")
                 }
                 Spacer()
             }

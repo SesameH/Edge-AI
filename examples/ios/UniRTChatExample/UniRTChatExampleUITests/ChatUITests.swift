@@ -63,15 +63,33 @@ final class ChatUITests: XCTestCase {
         XCTAssertFalse(textReply.isEmpty, "no reply mentioning Paris appeared in time")
         Thread.sleep(forTimeInterval: 2.5) // hold the finished reply on screen before switching modes
 
-        app.segmentedControls["modePicker"].buttons["Vision"].tap()
+        let modelNameText = app.staticTexts["modelNameText"]
+        let visionSegment = app.segmentedControls["modePicker"].buttons["Vision"]
+        // The segmented-control tap has occasionally not registered (mode
+        // stays on Text); retry rather than fail once on a missed tap.
+        var switchedToVision = false
+        for _ in 0..<3 {
+            visionSegment.tap()
+            let deadline = Date().addingTimeInterval(10)
+            while !modelNameText.label.contains("vlm-model"), Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.3)
+            }
+            if modelNameText.label.contains("vlm-model") {
+                switchedToVision = true
+                break
+            }
+        }
+        XCTAssertTrue(switchedToVision, "mode picker never switched to Vision (model name: \(modelNameText.label))")
+
         _ = waitForReady(app)
 
         if deviceValue.waitForExistence(timeout: 5) {
             print("UNIRT device (vision): \(deviceValue.label)")
         }
 
-        Thread.sleep(forTimeInterval: 0.4)
-        app.buttons["attachButton"].tap()
+        let attachButton = app.buttons["attachButton"]
+        XCTAssertTrue(attachButton.waitForExistence(timeout: 5))
+        attachButton.tap()
         Thread.sleep(forTimeInterval: 0.6)
 
         typeSlowly("What do you see in this image?", into: input)
