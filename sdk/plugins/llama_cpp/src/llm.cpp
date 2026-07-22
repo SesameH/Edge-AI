@@ -16,6 +16,7 @@
 
 #include "logging.h"
 #include "generation_state.h"
+#include "device_label.h"
 
 namespace unirt::llama_plugin {
 
@@ -122,21 +123,16 @@ int32_t LlamaCppLlm::create(const unirt_LlmCreateInput* input) {
         }
         selected_devices = {device, nullptr};
         model_params.devices = selected_devices.data();
-        const char* description = ggml_backend_dev_description(device);
-        selected_device_name = description ? description : input->device_id;
+        selected_device_name = device_label(device, input->device_id);
     } else if (model_params.n_gpu_layers == 0) {
         if (auto* device = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU)) {
             selected_devices = {device, nullptr};
             model_params.devices = selected_devices.data();
-            if (const char* description = ggml_backend_dev_description(device)) {
-                selected_device_name = description;
-            }
+            selected_device_name = device_label(device, "CPU");
         }
     } else {
         if (auto* device = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU)) {
-            if (const char* description = ggml_backend_dev_description(device)) {
-                selected_device_name = description;
-            }
+            selected_device_name = device_label(device, "GPU");
         }
     }
 
@@ -185,9 +181,7 @@ int32_t LlamaCppLlm::create(const unirt_LlmCreateInput* input) {
         if (auto* cpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU)) {
             selected_devices = {cpu, nullptr};
             model_params.devices = selected_devices.data();
-            if (const char* description = ggml_backend_dev_description(cpu)) {
-                selected_device_name = description;
-            }
+            selected_device_name = device_label(cpu, "CPU");
         } else {
             model_params.devices = nullptr;
         }

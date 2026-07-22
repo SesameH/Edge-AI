@@ -19,6 +19,7 @@
 
 #include "generation_state.h"
 #include "logging.h"
+#include "device_label.h"
 
 namespace unirt::llama_plugin {
 
@@ -155,21 +156,16 @@ int32_t LlamaCppVlm::create(const unirt_VlmCreateInput* input) {
         model_params.devices = selected_devices.data();
         use_accelerator = ggml_backend_dev_type(device) == GGML_BACKEND_DEVICE_TYPE_GPU &&
                           model_params.n_gpu_layers != 0;
-        const char* description = ggml_backend_dev_description(device);
-        selected_device_name = description ? description : input->device_id;
+        selected_device_name = device_label(device, input->device_id);
     } else if (model_params.n_gpu_layers == 0) {
         if (auto* cpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU)) {
             selected_devices = {cpu, nullptr};
             model_params.devices = selected_devices.data();
-            if (const char* description = ggml_backend_dev_description(cpu)) {
-                selected_device_name = description;
-            }
+            selected_device_name = device_label(cpu, "CPU");
         }
         use_accelerator = false;
     } else if (auto* gpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU)) {
-        if (const char* description = ggml_backend_dev_description(gpu)) {
-            selected_device_name = description;
-        }
+        selected_device_name = device_label(gpu, "GPU");
     }
 
     ModelPtr model(llama_model_load_from_file(input->model_path, model_params));
@@ -208,9 +204,7 @@ int32_t LlamaCppVlm::create(const unirt_VlmCreateInput* input) {
         if (auto* cpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU)) {
             selected_devices = {cpu, nullptr};
             model_params.devices = selected_devices.data();
-            if (const char* description = ggml_backend_dev_description(cpu)) {
-                selected_device_name = description;
-            }
+            selected_device_name = device_label(cpu, "CPU");
         } else {
             model_params.devices = nullptr;
         }
