@@ -1,0 +1,39 @@
+name: UniRTChatExample
+options:
+  bundleIdPrefix: com.peterhuang.unirt
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+packages:
+  UniRTKit:
+    path: ../../../bindings/ios
+targets:
+  UniRTChatExample:
+    type: application
+    platform: iOS
+    sources:
+      - path: UniRTChatExample
+      - path: Resources
+    dependencies:
+      - package: UniRTKit
+    info:
+      path: UniRTChatExample/Info.plist
+      properties:
+        UILaunchScreen: {}
+        CFBundleDisplayName: UniRT Chat
+    scheme:
+      testTargets:
+        - UniRTChatExampleUITests
+  UniRTChatExampleUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UniRTChatExampleUITests
+    dependencies:
+      - target: UniRTChatExample
+    settings:
+      GENERATE_INFOPLIST_FILE: YES
+      TEST_TARGET_NAME: UniRTChatExample

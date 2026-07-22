@@ -14,6 +14,15 @@ local.properties
 # Built XCFramework (bindings/ios) — see bindings/ios/framework/CMakeLists.txt
 *.xcframework/
 
+# iOS example app: xcodegen regenerates the .xcodeproj from project.yml,
+# and the bundled test model is a copy from models/ (see its README)
+examples/ios/UniRTChatExample/UniRTChatExample.xcodeproj/
+examples/ios/UniRTChatExample/UniRTChatExample/Info.plist
+examples/ios/UniRTChatExample/Resources/*.gguf
+
+# Xcode per-user state (scheme management, breakpoints) — not project config
+**/xcuserdata/
+
 # Test models (downloaded per README; hundreds of MB)
 models/
 
