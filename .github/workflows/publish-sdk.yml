@@ -132,6 +132,13 @@ jobs:
           cp core/sdk/include/unirt.h unirt-sdk/ios/Sources/CUniRT/unirt.h
           mkdir -p unirt-sdk/examples
           cp core/examples/chat.html unirt-sdk/examples/chat.html
+          rsync -a --delete \
+            --exclude '*.gguf' --exclude '*.xcodeproj' \
+            --exclude 'UniRTChatExample/Info.plist' --exclude '.swiftpm' \
+            core/examples/ios/UniRTChatExample/ unirt-sdk/examples/ios/UniRTChatExample/
+          # unirt-sdk's Swift package lives at ios/, not bindings/ios/
+          sed -i 's#path: \.\./\.\./\.\./bindings/ios#path: ../../../ios#' \
+            unirt-sdk/examples/ios/UniRTChatExample/project.yml
       - name: Commit source sync
         run: |
           cd unirt-sdk
