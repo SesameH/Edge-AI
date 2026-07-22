@@ -14,6 +14,23 @@ mmproj is present. MLX remains text-only and fails explicitly for VLM models.
 MLX also requires a usable Metal device; if none is visible, model loading
 fails before native model allocation.
 
+## Install
+
+```sh
+pip install unirt
+```
+
+macOS arm64 wheels ship every native library — no toolchain, no build step.
+
+## Quickstart (CLI)
+
+```sh
+unirt chat bartowski/SmolLM2-135M-Instruct-GGUF   # download + interactive chat
+unirt pull <hf-repo>                              # download only
+unirt ls                                          # cached models
+unirt devices                                     # plugins + devices
+```
+
 ## Usage
 
 ```python
@@ -53,6 +70,17 @@ Generation is stateless by default (`n_past=0` clears prior KV state before
 prefilling the supplied prompt). To continue from a known cached prefix, pass
 the exact prefix length through `n_past`; invalid values are rejected rather
 than silently duplicating context.
+
+## OpenAI-compatible server
+
+```sh
+python3 -m unirt.server --model bartowski/SmolLM2-135M-Instruct-GGUF \
+  --backend llama_cpp --port 8080
+```
+
+Then point any OpenAI client (or plain curl) at
+`http://localhost:8080/v1/chat/completions` — streaming SSE included, and
+GGUF VLMs accept image content parts when loaded with an mmproj.
 
 The native library is discovered automatically from `<repo>/sdk/pkg-unirt/lib`
 (dev layout) or the packaged wheel; set `UNIRT_LIB_PATH` / `UNIRT_PLUGIN_PATH`
