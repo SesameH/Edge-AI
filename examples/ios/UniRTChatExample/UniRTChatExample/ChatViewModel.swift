@@ -32,6 +32,8 @@ final class ChatViewModel: ObservableObject {
     private var vlmSession: VlmSession?
     private var llmHistory: [ChatMessage] = []
     private var vlmHistory: [VlmChatMessage] = []
+    private var llmMessages: [DisplayMessage] = []
+    private var vlmMessages: [DisplayMessage] = []
     private var statsTask: Task<Void, Never>?
     private var pluginRegistered = false
 
@@ -41,16 +43,36 @@ final class ChatViewModel: ObservableObject {
         await switchMode(to: .text)
     }
 
+    /// Both sessions, once opened, stay resident for the app's lifetime —
+    /// switching modes never re-loads or frees a model. Loading the VLM's
+    /// ~300MB of weights is enough of a momentary memory spike that iOS has
+    /// been observed reclaiming memory from (and killing) the Control Center
+    /// screen-recording broadcast process right as a switch completes;
+    /// paying that cost once per mode instead of on every toggle makes that
+    /// risk a one-time thing rather than a per-switch one. Warm up both
+    /// modes once before recording a demo and every switch after that is
+    /// instant with no new memory churn.
     func switchMode(to newMode: ChatMode) async {
-        statsTask?.cancel()
-        await llmSession?.close()
-        await vlmSession?.close()
-        llmSession = nil
-        vlmSession = nil
-        messages = []
-        attachedImagePath = nil
-        stats = nil
         mode = newMode
+        attachedImagePath = nil
+
+        if newMode == .text, llmSession != nil {
+            messages = llmMessages
+            stats = try? await llmSession?.runtimeStats()
+            status = "ready (\(UniRT.plugins.joined(separator: ", ")))"
+            return
+        }
+        if newMode == .vision, let session = vlmSession {
+            messages = vlmMessages
+            stats = try? await session.runtimeStats()
+            let caps = try? await session.capabilities()
+            status = "ready (\(UniRT.plugins.joined(separator: ", "))) — vision: \(caps?.supportsVision == true)"
+            return
+        }
+
+        statsTask?.cancel()
+        messages = []
+        stats = nil
         status = "loading model..."
 
         do {
@@ -66,7 +88,6 @@ final class ChatViewModel: ObservableObject {
                     return
                 }
                 modelName = (modelPath as NSString).lastPathComponent
-                llmHistory = []
                 llmSession = try await UniRT.createLlmSession(modelPath: modelPath, nCtx: 2048)
                 status = "ready (\(UniRT.plugins.joined(separator: ", ")))"
             case .vision:
@@ -76,7 +97,6 @@ final class ChatViewModel: ObservableObject {
                 }
                 let mmprojPath = Bundle.main.path(forResource: "mmproj", ofType: "gguf")
                 modelName = (modelPath as NSString).lastPathComponent
-                vlmHistory = []
                 vlmSession = try await UniRT.createVlmSession(modelPath: modelPath, mmprojPath: mmprojPath, nCtx: 2048)
                 let caps = try await vlmSession?.capabilities()
                 status = "ready (\(UniRT.plugins.joined(separator: ", "))) — vision: \(caps?.supportsVision == true)"
@@ -93,10 +113,11 @@ final class ChatViewModel: ObservableObject {
             while !Task.isCancelled {
                 guard let self else { return }
                 if !self.isBusy {
-                    if let session = self.llmSession {
-                        self.stats = try? await session.runtimeStats()
-                    } else if let session = self.vlmSession {
-                        self.stats = try? await session.runtimeStats()
+                    switch self.mode {
+                    case .text:
+                        self.stats = try? await self.llmSession?.runtimeStats()
+                    case .vision:
+                        self.stats = try? await self.vlmSession?.runtimeStats()
                     }
                 }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -149,6 +170,7 @@ final class ChatViewModel: ObservableObject {
                 status = "ready"
             }
             isBusy = false
+            llmMessages = messages
         }
     }
 
@@ -179,6 +201,7 @@ final class ChatViewModel: ObservableObject {
                 status = "ready"
             }
             isBusy = false
+            vlmMessages = messages
         }
     }
 }
