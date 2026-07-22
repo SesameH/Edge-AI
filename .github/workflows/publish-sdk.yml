@@ -146,6 +146,8 @@ jobs:
           # unirt-sdk's Android library module lives at android/, not bindings/android/
           sed -i 's#bindings/android/build/outputs#android/build/outputs#' \
             unirt-sdk/examples/android/UniRTChatExample/app/build.gradle.kts
+          sed -i 's|cd bindings/android && ./gradlew assembleRelease && cd -|cd android \&\& ./gradlew assembleRelease \&\& cd -   # needs prebuilt/<abi>/*.so, see android/README.md|' \
+            unirt-sdk/examples/android/UniRTChatExample/README.md
       - name: Commit source sync
         run: |
           cd unirt-sdk
