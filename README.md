@@ -2,6 +2,8 @@
 
 On-device inference runtime for **multiple hardware backends**. The stable C API covers LLM, VLM, and embedding handles; llama.cpp supports text, libmtmd image/audio inputs, and GGUF sentence embeddings; MLX implements text generation; ONNX Runtime runs encoder embeddings.
 
+![examples/chat.py running the llama_cpp backend end-to-end](docs/chat-demo.gif)
+
 ## Architecture
 
 ```
