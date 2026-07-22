@@ -195,7 +195,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val prompt = session.applyChatTemplate(vlmHistory)
-                val options = VlmGenerateOptions(maxTokens = 160, imagePaths = listOfNotNull(imagePath))
+                // The template re-renders the whole transcript, so every image
+                // marker in it — past turns included — needs its file supplied
+                // again, in order; sending only the new image fails with
+                // "prompt has N media markers but M files were supplied".
+                // The prefix cache keeps re-supplied old images cheap.
+                val allImages = vlmHistory.flatMap { it.contents }
+                    .filterIsInstance<ContentPart.Image>()
+                    .map { it.path }
+                val options = VlmGenerateOptions(maxTokens = 160, imagePaths = allImages)
                 var full = ""
                 session.stream(prompt, options).collect { event ->
                     when (event) {

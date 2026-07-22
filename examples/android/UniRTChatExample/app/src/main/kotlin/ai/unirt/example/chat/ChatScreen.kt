@@ -140,7 +140,7 @@ private fun Header(viewModel: ChatViewModel) {
 @Composable
 private fun StatsRow(profile: GenerationProfile?) {
     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { StatCard("TTFT", profile?.let { "${it.ttft} ms" } ?: "—") }
+        item { StatCard("TTFT", profile?.let { "${it.ttft / 1000} ms" } ?: "—") }
         item { StatCard("PREFILL", profile?.let { "%.1f tok/s".format(it.prefillSpeed) } ?: "—") }
         item { StatCard("DECODE", profile?.let { "%.1f tok/s".format(it.decodeSpeed) } ?: "—", valueTag = "decodeStatValue") }
         item { StatCard("TOKENS", profile?.let { "${it.promptTokens}+${it.generatedTokens}" } ?: "—") }

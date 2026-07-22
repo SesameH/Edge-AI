@@ -188,7 +188,16 @@ final class ChatViewModel: ObservableObject {
         Task {
             do {
                 let prompt = try await session.applyChatTemplate(vlmHistory)
-                let options = VlmGenerateOptions(maxTokens: 160, imagePaths: imagePath.map { [$0] } ?? [])
+                // The template re-renders the whole transcript, so every image
+                // marker in it — past turns included — needs its file supplied
+                // again, in order; sending only the new image fails with
+                // "prompt has N media markers but M files were supplied".
+                // The prefix cache keeps re-supplied old images cheap.
+                let allImages = vlmHistory.flatMap(\.contents).compactMap { part -> String? in
+                    if case let .image(path) = part { return path }
+                    return nil
+                }
+                let options = VlmGenerateOptions(maxTokens: 160, imagePaths: allImages)
                 var full = ""
                 for try await piece in session.stream(prompt: prompt, options: options) {
                     full += piece
