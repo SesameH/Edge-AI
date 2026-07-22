@@ -23,10 +23,13 @@ from `project.yml` — the `.xcodeproj` is not checked in.
 ```sh
 brew install xcodegen
 
-# bundle test resources (any GGUF works; these match the repo's other examples)
-cp ../../../models/SmolLM2-135M-Instruct-Q8_0.gguf Resources/model.gguf
-cp ~/.cache/unirt/models/runanywhere/LFM2-VL-450M-GGUF/LFM2-VL-450M-Q4_0.gguf Resources/vlm-model.gguf
-cp ~/.cache/unirt/models/runanywhere/LFM2-VL-450M-GGUF/mmproj-LFM2-VL-450M-Q8_0.gguf Resources/mmproj.gguf
+# bundle test resources (any GGUF works; these are just small, easy defaults)
+curl -L -o Resources/model.gguf \
+  "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf"
+curl -L -o Resources/vlm-model.gguf \
+  "https://huggingface.co/runanywhere/LFM2-VL-450M-GGUF/resolve/main/LFM2-VL-450M-Q4_0.gguf"
+curl -L -o Resources/mmproj.gguf \
+  "https://huggingface.co/runanywhere/LFM2-VL-450M-GGUF/resolve/main/mmproj-LFM2-VL-450M-Q8_0.gguf"
 # test-photo.jpg is already checked in (a small synthetic scene for the VLM test)
 
 xcodegen generate
@@ -102,10 +105,14 @@ not during.
 `ChatViewModel` holds two possible sessions — an `LlmSession` and a
 `VlmSession`, both wrapping the same statically-linked llama_cpp plugin
 (`UniRT.registerStaticPlugin` once at startup; iOS forbids `dlopen` of
-arbitrary paths). Switching the segmented picker tears down whichever
-session is active and opens the other from its bundled GGUF, mirroring
-`bindings/ios/README.md`'s usage snippets for both `createLlmSession` and
-`createVlmSession`. Vision mode's "+" button attaches the bundled
+arbitrary paths). The first time the segmented picker switches to a mode,
+it opens that mode's session from its bundled GGUF, mirroring the iOS
+binding's own README usage snippets for both `createLlmSession` and
+`createVlmSession`; after that, both sessions stay resident and switching
+back and forth is instant — reloading a ~300MB VLM model on every toggle
+was enough of a momentary memory spike to make iOS reclaim memory from (and
+kill) an active Control Center screen recording. Vision mode's "+" button
+attaches the bundled
 `test-photo.jpg` (a stand-in for real drag-and-drop, which iOS doesn't
 support the same way the web test page does) before `send()` passes it
 through `VlmGenerateOptions.imagePaths`.
