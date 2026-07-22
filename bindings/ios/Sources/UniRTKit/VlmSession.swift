@@ -189,6 +189,20 @@ public actor VlmSession {
         try UniRTError.check(unirt_vlm_reset(try requireOpen()))
     }
 
+    /// Memory footprint of the loaded model — same shape as `LlmSession.runtimeStats()`.
+    public func runtimeStats() throws -> LlmRuntimeStats {
+        let handle = try requireOpen()
+        var output = unirt_VlmRuntimeStats()
+        try UniRTError.check(unirt_vlm_get_runtime_stats(handle, &output))
+        return LlmRuntimeStats(
+            modelBytes: output.model_bytes,
+            kvCacheBytes: output.kv_cache_bytes,
+            devicePeakBytes: output.device_peak_bytes,
+            processRssBytes: output.process_rss_bytes,
+            deviceName: output.device_name.map { String(cString: $0) }
+        )
+    }
+
     /// Unload the model. Safe to call more than once.
     public func close() {
         guard let handle else { return }

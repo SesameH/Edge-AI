@@ -20,7 +20,7 @@
 #   cmake -S bindings/ios/framework -B build-ios-framework \
 #     -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator \
 #     -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
-#     -DGGML_METAL=OFF -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
+#     -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
 #   cmake --build build-ios-framework -j8
 #
 # Output: libunirt_ios.dylib (one file, no sibling dylibs needed).

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import SwiftUI
+import UIKit
 
 private enum Theme {
     static let bg = Color(red: 0.02, green: 0.03, blue: 0.05)
@@ -22,6 +23,10 @@ struct ContentView: View {
                 header
                 statsRow
                 log
+                if viewModel.mode == .vision, let path = viewModel.attachedImagePath,
+                   let image = UIImage(contentsOfFile: path) {
+                    attachmentChip(image)
+                }
                 composer
             }
             .padding(12)
@@ -33,44 +38,53 @@ struct ContentView: View {
     private var background: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
-            Circle()
-                .fill(Theme.cyan.opacity(0.25))
-                .frame(width: 340, height: 340)
-                .blur(radius: 90)
-                .offset(x: -140, y: -300)
-            Circle()
-                .fill(Theme.violet.opacity(0.20))
-                .frame(width: 340, height: 340)
-                .blur(radius: 90)
-                .offset(x: 160, y: -260)
+            Circle().fill(Theme.cyan.opacity(0.25)).frame(width: 340, height: 340).blur(radius: 90).offset(x: -140, y: -300)
+            Circle().fill(Theme.violet.opacity(0.20)).frame(width: 340, height: 340).blur(radius: 90).offset(x: 160, y: -260)
         }
         .ignoresSafeArea()
     }
 
     private var header: some View {
-        HStack {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(viewModel.isBusy ? Theme.violet : Theme.cyan)
-                    .frame(width: 8, height: 8)
-                Text("UNIRT")
-                    .font(.system(.callout, design: .monospaced)).bold()
-                    .foregroundStyle(Theme.cyan)
-                Text("— \(viewModel.modelName)")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(Theme.dim)
-                    .lineLimit(1)
+        VStack(spacing: 10) {
+            HStack {
+                HStack(spacing: 6) {
+                    Circle().fill(viewModel.isBusy ? Theme.violet : Theme.cyan).frame(width: 8, height: 8)
+                    Text("UNIRT").font(.system(.callout, design: .monospaced)).bold().foregroundStyle(Theme.cyan)
+                    Text("— \(viewModel.modelName)")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(Theme.dim)
+                        .lineLimit(1)
+                }
+                Spacer()
             }
-            Spacer()
+
+            Picker("Mode", selection: modeBinding) {
+                ForEach(ChatMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(viewModel.isBusy)
+            .accessibilityIdentifier("modePicker")
         }
         .padding(12)
         .glassPanel()
     }
 
+    private var modeBinding: Binding<ChatMode> {
+        Binding(
+            get: { viewModel.mode },
+            set: { newMode in
+                guard newMode != viewModel.mode else { return }
+                Task { await viewModel.switchMode(to: newMode) }
+            }
+        )
+    }
+
     private var statsRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                statCard("DEVICE", viewModel.stats?.deviceName ?? "—")
+                statCard("DEVICE", viewModel.stats?.deviceName ?? "—", valueID: "deviceStatValue")
                 statCard("MODEL MEM", formatBytes(viewModel.stats?.modelBytes))
                 statCard("KV CACHE", formatBytes(viewModel.stats?.kvCacheBytes))
                 statCard("DEVICE PEAK", formatBytes(viewModel.stats?.devicePeakBytes))
@@ -81,14 +95,13 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: viewModel.isBusy)
     }
 
-    private func statCard(_ label: String, _ value: String) -> some View {
+    private func statCard(_ label: String, _ value: String, valueID: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(Theme.dim)
+            Text(label).font(.system(size: 9, design: .monospaced)).foregroundStyle(Theme.dim)
             Text(value)
                 .font(.system(.footnote, design: .monospaced)).bold()
                 .foregroundStyle(Theme.cyan)
+                .accessibilityIdentifier(valueID ?? "")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -116,9 +129,39 @@ struct ContentView: View {
         .glassPanel()
     }
 
+    private func attachmentChip(_ image: UIImage) -> some View {
+        HStack {
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 44, height: 44)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.cyan.opacity(0.5)))
+            Text("test-photo.jpg").font(.system(.caption, design: .monospaced)).foregroundStyle(Theme.dim)
+            Spacer()
+            Button("Remove") { viewModel.clearAttachment() }
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(Theme.violet)
+        }
+        .padding(8)
+        .glassPanel()
+    }
+
     private var composer: some View {
         VStack(spacing: 6) {
             HStack(spacing: 8) {
+                if viewModel.mode == .vision {
+                    Button(action: { viewModel.attachTestImage() }) {
+                        Text("+")
+                            .font(.system(.title3, design: .monospaced)).bold()
+                            .foregroundStyle(Theme.cyan)
+                            .frame(width: 40, height: 40)
+                    }
+                    .background(Color.white.opacity(0.04))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
+                    .accessibilityIdentifier("attachButton")
+                }
+
                 TextField("", text: $viewModel.input, prompt: Text("Ask something...").foregroundColor(Theme.dim))
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(.white)
@@ -154,16 +197,22 @@ struct ContentView: View {
         let isUser = message.role == "user"
         HStack {
             if isUser { Spacer(minLength: 32) }
-            Text(message.text)
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.92))
-                .padding(12)
-                .background((isUser ? Theme.cyan : Theme.violet).opacity(0.10))
-                .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.radius)
-                        .stroke((isUser ? Theme.cyan : Theme.violet).opacity(0.4), lineWidth: 1)
-                )
+            VStack(alignment: .leading, spacing: 6) {
+                if let path = message.imagePath, let image = UIImage(contentsOfFile: path) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 140, height: 100)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                Text(message.text)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.92))
+            }
+            .padding(12)
+            .background((isUser ? Theme.cyan : Theme.violet).opacity(0.10))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke((isUser ? Theme.cyan : Theme.violet).opacity(0.4), lineWidth: 1))
             if !isUser { Spacer(minLength: 32) }
         }
     }
@@ -173,10 +222,7 @@ private struct GlassPanel: ViewModifier {
     func body(content: Content) -> some View {
         content
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Theme.radius))
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.radius)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
-            )
+            .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke(Color.white.opacity(0.08), lineWidth: 1))
     }
 }
 
