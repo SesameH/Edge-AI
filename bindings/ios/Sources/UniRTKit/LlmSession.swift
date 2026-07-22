@@ -119,6 +119,21 @@ public actor LlmSession {
         try UniRTError.check(unirt_llm_reset(try requireOpen()))
     }
 
+    /// Memory footprint of the loaded model — weights, KV cache, device peak,
+    /// process RSS, and the active compute device name. Cheap; safe to poll.
+    public func runtimeStats() throws -> LlmRuntimeStats {
+        let handle = try requireOpen()
+        var output = unirt_LlmRuntimeStats()
+        try UniRTError.check(unirt_llm_get_runtime_stats(handle, &output))
+        return LlmRuntimeStats(
+            modelBytes: output.model_bytes,
+            kvCacheBytes: output.kv_cache_bytes,
+            devicePeakBytes: output.device_peak_bytes,
+            processRssBytes: output.process_rss_bytes,
+            deviceName: output.device_name.map { String(cString: $0) }
+        )
+    }
+
     /// Unload the model. Safe to call more than once.
     public func close() {
         guard let handle else { return }

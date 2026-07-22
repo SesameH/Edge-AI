@@ -8,7 +8,7 @@ final class ChatUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
-        let status = app.staticTexts.firstMatch
+        let status = app.staticTexts["statusText"]
         XCTAssertTrue(status.waitForExistence(timeout: 30))
         let deadline = Date().addingTimeInterval(30)
         while !status.label.hasPrefix("ready"), Date() < deadline {

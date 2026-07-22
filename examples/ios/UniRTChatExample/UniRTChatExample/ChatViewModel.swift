@@ -17,22 +17,40 @@ final class ChatViewModel: ObservableObject {
     @Published var input: String = ""
     @Published var status: String = "loading model..."
     @Published var isBusy: Bool = false
+    @Published var modelName: String = ""
+    @Published var stats: LlmRuntimeStats?
 
     private var session: LlmSession?
     private var history: [ChatMessage] = []
+    private var statsTask: Task<Void, Never>?
 
     func start() async {
         guard let modelPath = Bundle.main.path(forResource: "model", ofType: "gguf") else {
             status = "model.gguf not bundled — see examples/ios/README.md"
             return
         }
+        modelName = (modelPath as NSString).lastPathComponent
         do {
             try UniRT.registerStaticPlugin(identity: unirt_plugin_id, open: unirt_plugin_open)
             try UniRT.start()
             session = try await UniRT.createLlmSession(modelPath: modelPath, nCtx: 2048)
             status = "ready (\(UniRT.plugins.joined(separator: ", ")))"
+            startStatsPolling()
         } catch {
             status = "load failed: \(error)"
+        }
+    }
+
+    private func startStatsPolling() {
+        statsTask?.cancel()
+        statsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if !self.isBusy, let session = self.session {
+                    self.stats = try? await session.runtimeStats()
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
         }
     }
 
@@ -64,4 +82,18 @@ final class ChatViewModel: ObservableObject {
             isBusy = false
         }
     }
+}
+
+func formatBytes(_ n: Int64?) -> String {
+    guard let n, n >= 0 else { return "n/a" }
+    if n == 0 { return "0 B" }
+    let units = ["B", "KB", "MB", "GB"]
+    var value = Double(n)
+    var unitIndex = 0
+    while value >= 1024, unitIndex < units.count - 1 {
+        value /= 1024
+        unitIndex += 1
+    }
+    let decimals = (value >= 10 || unitIndex == 0) ? 0 : 1
+    return String(format: "%.\(decimals)f %@", value, units[unitIndex])
 }

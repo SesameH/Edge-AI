@@ -15,6 +15,16 @@ public struct ChatMessage: Sendable {
     public static func system(_ content: String) -> ChatMessage { ChatMessage(role: "system", content: content) }
 }
 
+/// Memory footprint of a loaded model. Byte fields are `-1` when the
+/// backend cannot measure them (distinct from a real zero).
+public struct LlmRuntimeStats: Sendable {
+    public let modelBytes: Int64
+    public let kvCacheBytes: Int64
+    public let devicePeakBytes: Int64
+    public let processRssBytes: Int64
+    public let deviceName: String?
+}
+
 /// Sampling controls; the defaults mean greedy decoding.
 public struct GenerateOptions: Sendable {
     public var maxTokens: Int32
