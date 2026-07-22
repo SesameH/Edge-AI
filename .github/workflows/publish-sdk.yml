@@ -130,6 +130,8 @@ jobs:
           rsync -a --delete core/bindings/ios/Tests/ unirt-sdk/ios/Tests/
           cp core/sdk/include/unirt.h unirt-sdk/include/unirt.h
           cp core/sdk/include/unirt.h unirt-sdk/ios/Sources/CUniRT/unirt.h
+          mkdir -p unirt-sdk/examples
+          cp core/examples/chat.html unirt-sdk/examples/chat.html
       - name: Commit source sync
         run: |
           cd unirt-sdk
