@@ -168,6 +168,26 @@ jobs:
       - name: Build the AAR
         run: ./gradlew assembleRelease --console=plain
         working-directory: unirt-sdk/android
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build macOS arm64 wheel (native libs bundled)
+        run: |
+          set -e
+          python3 -m pip install --quiet build wheel
+          tar -C core/bindings/python/unirt -xzf artifacts/unirt-python-native-macos-arm64.tar.gz
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^VERSION = .*/VERSION = (${VERSION//./, })/" core/bindings/python/unirt/_version.py
+          cd core/bindings/python
+          python3 -m build --wheel
+          # The wheel is pure-Python plus prebuilt dylibs, so build tags it
+          # py3-none-any; retag to the platform the dylibs were built for.
+          python3 -m wheel tags --platform-tag macosx_14_0_arm64 --remove dist/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: publish-wheel
+          path: core/bindings/python/dist/*.whl
+          retention-days: 7
       - name: Locate release assets
         run: |
           set -e
@@ -175,6 +195,7 @@ jobs:
           cp "$(find unirt-sdk/android/build/outputs/aar -name '*.aar')" release-assets/unirt-android.aar
           cp artifacts/unirt-python-native-macos-arm64.tar.gz release-assets/
           cp artifacts/unirt-ios-xcframework.zip release-assets/
+          cp core/bindings/python/dist/*.whl release-assets/
       - name: Create GitHub Release on unirt-sdk
         env:
           GH_TOKEN: ${{ secrets.UNIRT_SDK_PUSH_TOKEN }}
@@ -185,4 +206,26 @@ jobs:
             --notes "Prebuilt native libraries for UniRT ${{ github.ref_name }}. See README.md for install instructions per platform." \
             release-assets/unirt-python-native-macos-arm64.tar.gz \
             release-assets/unirt-android.aar \
-            release-assets/unirt-ios-xcframework.zip
+            release-assets/unirt-ios-xcframework.zip \
+            release-assets/*.whl
+
+  publish-pypi:
+    name: Publish wheel to PyPI
+    # Gated behind a repo variable so the workflow stays green until PyPI
+    # trusted publishing is configured (pypi.org -> project unirt -> add
+    # publisher: SesameH/Edge-AI, workflow publish-sdk.yml). Then set the
+    # repository variable PYPI_PUBLISH=true.
+    if: vars.PYPI_PUBLISH == 'true'
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: publish-wheel
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
