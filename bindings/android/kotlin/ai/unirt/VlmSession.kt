@@ -81,6 +81,10 @@ interface VlmSession : AutoCloseable {
     /** Drop the conversation state (KV cache and transcript). */
     suspend fun reset()
 
+    /** Memory usage of the loaded model (weights + projector). Cheap; fine
+     *  to call between generations (e.g. from a polling loop). */
+    suspend fun runtimeStats(): RuntimeStats
+
     /** Template + generate in one call. */
     suspend fun chat(
         messages: List<VlmChatMessage>,

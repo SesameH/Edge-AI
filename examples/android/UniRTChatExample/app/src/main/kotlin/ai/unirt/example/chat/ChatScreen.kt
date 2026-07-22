@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.safeDrawingPadding
 import ai.unirt.GenerationProfile
+import ai.unirt.RuntimeStats
 
 private object Theme {
     val bg = Color(0.02f, 0.03f, 0.05f)
@@ -72,7 +73,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Header(viewModel)
-            StatsRow(viewModel.profile)
+            StatsRow(viewModel.stats, viewModel.profile)
             MessageLog(viewModel, modifier = Modifier.weight(1f))
             viewModel.attachedImagePath?.let { AttachmentChip(it) { viewModel.clearAttachment() } }
             Composer(viewModel)
@@ -138,14 +139,32 @@ private fun Header(viewModel: ChatViewModel) {
 }
 
 @Composable
-private fun StatsRow(profile: GenerationProfile?) {
+private fun StatsRow(stats: RuntimeStats?, profile: GenerationProfile?) {
     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { StatCard("DEVICE", stats?.deviceName ?: "—", valueTag = "deviceStatValue") }
+        item { StatCard("MODEL MEM", formatBytes(stats?.modelBytes)) }
+        item { StatCard("KV CACHE", formatBytes(stats?.kvCacheBytes)) }
+        item { StatCard("PROCESS RSS", formatBytes(stats?.processRssBytes)) }
         item { StatCard("TTFT", profile?.let { "${it.ttft / 1000} ms" } ?: "—") }
         item { StatCard("PREFILL", profile?.let { "%.1f tok/s".format(it.prefillSpeed) } ?: "—") }
         item { StatCard("DECODE", profile?.let { "%.1f tok/s".format(it.decodeSpeed) } ?: "—", valueTag = "decodeStatValue") }
         item { StatCard("TOKENS", profile?.let { "${it.promptTokens}+${it.generatedTokens}" } ?: "—") }
         item { StatCard("STOP", profile?.stopReason ?: "—") }
     }
+}
+
+private fun formatBytes(n: Long?): String {
+    if (n == null || n < 0) return "—"
+    if (n == 0L) return "0 B"
+    val units = listOf("B", "KB", "MB", "GB")
+    var value = n.toDouble()
+    var unit = 0
+    while (value >= 1024 && unit < units.lastIndex) {
+        value /= 1024
+        unit++
+    }
+    val decimals = if (value >= 10 || unit == 0) 0 else 1
+    return "%.${decimals}f %s".format(value, units[unit])
 }
 
 @Composable

@@ -16,12 +16,16 @@ import ai.unirt.GenerateOptions
 import ai.unirt.GenerationProfile
 import ai.unirt.LlmSession
 import ai.unirt.LlmStreamResult
+import ai.unirt.RuntimeStats
 import ai.unirt.UniRT
 import ai.unirt.VlmChatMessage
 import ai.unirt.VlmGenerateOptions
 import ai.unirt.VlmSession
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -51,6 +55,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var profile by mutableStateOf<GenerationProfile?>(null)
         private set
+    var stats by mutableStateOf<RuntimeStats?>(null)
+        private set
     var attachedImagePath by mutableStateOf<String?>(null)
         private set
 
@@ -61,6 +67,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var llmMessages = listOf<DisplayMessage>()
     private var vlmMessages = listOf<DisplayMessage>()
     private var started = false
+    private var statsJob: Job? = null
 
     val testImagePath: String? get() = ensureAsset("test-photo.jpg")
 
@@ -117,10 +124,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 status = readyStatus()
+                startStatsPolling()
             } catch (e: Exception) {
                 status = "load failed: ${e.message}"
             } finally {
                 isBusy = false
+            }
+        }
+    }
+
+    /** Live memory/device stats every 2 s while idle — generation owns the
+     *  session's single native thread, so polling waits it out via isBusy. */
+    private fun startStatsPolling() {
+        statsJob?.cancel()
+        statsJob = viewModelScope.launch {
+            while (isActive) {
+                if (!isBusy) {
+                    stats = try {
+                        when (mode) {
+                            ChatMode.Text -> llmSession?.runtimeStats()
+                            ChatMode.Vision -> vlmSession?.runtimeStats()
+                        }
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                delay(2_000)
             }
         }
     }

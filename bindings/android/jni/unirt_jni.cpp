@@ -88,6 +88,24 @@ jobject to_generate_result(JNIEnv* env, const char* text, const unirt_ProfileDat
     return result;
 }
 
+/** Builds an ai.unirt.RuntimeStats from either modality's stats struct —
+ *  unirt_LlmRuntimeStats and unirt_VlmRuntimeStats are deliberately the
+ *  same shape (see unirt.h), so one builder serves both. */
+jobject to_runtime_stats(
+    JNIEnv* env, int64_t model_bytes, int64_t kv_cache_bytes, int64_t device_peak_bytes,
+    int64_t process_rss_bytes, const char* device_name) {
+    jclass stats_class = env->FindClass("ai/unirt/RuntimeStats");
+    if (!stats_class) return nullptr;
+    jmethodID ctor = env->GetMethodID(stats_class, "<init>", "(JJJJLjava/lang/String;)V");
+    if (!ctor) return nullptr;
+    jstring name = env->NewStringUTF(device_name ? device_name : "");
+    jobject stats = env->NewObject(
+        stats_class, ctor, static_cast<jlong>(model_bytes), static_cast<jlong>(kv_cache_bytes),
+        static_cast<jlong>(device_peak_bytes), static_cast<jlong>(process_rss_bytes), name);
+    env->DeleteLocalRef(name);
+    return stats;
+}
+
 }  // namespace
 
 extern "C" {
@@ -227,6 +245,14 @@ JNIEXPORT jobject JNICALL Java_ai_unirt_Native_llmGenerate(
     return result;
 }
 
+JNIEXPORT jobject JNICALL Java_ai_unirt_Native_llmRuntimeStats(JNIEnv* env, jclass, jlong handle) {
+    unirt_LlmRuntimeStats stats{};
+    if (unirt_llm_get_runtime_stats(as_llm(handle), &stats) != UNIRT_SUCCESS) return nullptr;
+    return to_runtime_stats(
+        env, stats.model_bytes, stats.kv_cache_bytes, stats.device_peak_bytes,
+        stats.process_rss_bytes, stats.device_name);
+}
+
 JNIEXPORT jlong JNICALL Java_ai_unirt_Native_vlmCreate(
     JNIEnv* env, jclass, jstring model_path, jstring mmproj_path, jstring plugin_id,
     jstring device_id, jint n_ctx, jint n_gpu_layers) {
@@ -267,6 +293,14 @@ JNIEXPORT jobject JNICALL Java_ai_unirt_Native_vlmGetCapabilities(JNIEnv* env, j
     return env->NewObject(
         caps_class, ctor, static_cast<jboolean>(caps.supports_vision),
         static_cast<jboolean>(caps.supports_audio));
+}
+
+JNIEXPORT jobject JNICALL Java_ai_unirt_Native_vlmRuntimeStats(JNIEnv* env, jclass, jlong handle) {
+    unirt_VlmRuntimeStats stats{};
+    if (unirt_vlm_get_runtime_stats(as_vlm(handle), &stats) != UNIRT_SUCCESS) return nullptr;
+    return to_runtime_stats(
+        env, stats.model_bytes, stats.kv_cache_bytes, stats.device_peak_bytes,
+        stats.process_rss_bytes, stats.device_name);
 }
 
 // Nested Kotlin arrays (one row of content parts per message) rather than a

@@ -6,6 +6,7 @@ package ai.unirt.internal
 import ai.unirt.LlmGenerateResult
 import ai.unirt.LlmStreamResult
 import ai.unirt.Native
+import ai.unirt.RuntimeStats
 import ai.unirt.TokenCallback
 import ai.unirt.UniRTException
 import ai.unirt.VlmCapabilities
@@ -120,6 +121,9 @@ internal class NativeVlmSession private constructor(
         val status = withContext(dispatcher) { Native.vlmReset(requireOpen()) }
         if (status < 0) throw UniRTException(status, Native.errorMessage(status))
     }
+
+    override suspend fun runtimeStats(): RuntimeStats =
+        withContext(dispatcher) { Native.vlmRuntimeStats(requireOpen()) ?: raise() }
 
     override fun close() {
         if (handle == 0L) return

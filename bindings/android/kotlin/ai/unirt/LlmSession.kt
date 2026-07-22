@@ -21,6 +21,19 @@ data class GenerationProfile(
 /** Raw JNI result of one llmGenerate() call: the full text plus its profile. */
 data class LlmGenerateResult(val text: String, val profile: GenerationProfile)
 
+/** Memory usage of a loaded model — weights, KV cache, device peak and
+ *  process RSS. Byte fields are -1 when the plugin cannot measure them;
+ *  processRssBytes spans the whole process, so it is not per-model when
+ *  several models are loaded. Mirrors unirt_LlmRuntimeStats /
+ *  unirt_VlmRuntimeStats (same shape by design). */
+data class RuntimeStats(
+    val modelBytes: Long,
+    val kvCacheBytes: Long,
+    val devicePeakBytes: Long,
+    val processRssBytes: Long,
+    val deviceName: String,
+)
+
 /** One event from [LlmSession.stream]. */
 sealed interface LlmStreamResult {
     data class Token(val text: String) : LlmStreamResult
@@ -72,6 +85,10 @@ interface LlmSession : AutoCloseable {
 
     /** Drop the conversation state (KV cache and transcript). */
     suspend fun reset()
+
+    /** Memory usage of the loaded model. Cheap; fine to call between
+     *  generations (e.g. from a polling loop). */
+    suspend fun runtimeStats(): RuntimeStats
 
     /** Template + generate in one call. */
     suspend fun chat(

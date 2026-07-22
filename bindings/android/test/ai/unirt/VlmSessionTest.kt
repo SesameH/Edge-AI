@@ -35,6 +35,9 @@ private class FakeVlmSession : VlmSession {
 
     override suspend fun reset() {}
 
+    override suspend fun runtimeStats(): RuntimeStats =
+        RuntimeStats(-1, -1, -1, -1, "fake")
+
     override fun close() {}
 }
 

@@ -33,6 +33,7 @@ internal object Native {
         handle: Long, prompt: String, maxTokens: Int, temperature: Float, topP: Float,
         topK: Int, seed: Int, onToken: TokenCallback?,
     ): LlmGenerateResult?
+    @JvmStatic external fun llmRuntimeStats(handle: Long): RuntimeStats?
 
     @JvmStatic external fun vlmCreate(
         modelPath: String, mmprojPath: String?, pluginId: String, deviceId: String?,
@@ -54,4 +55,5 @@ internal object Native {
         topK: Int, seed: Int, imagePaths: Array<String>, audioPaths: Array<String>,
         imageMaxLength: Int, onToken: TokenCallback?,
     ): LlmGenerateResult?
+    @JvmStatic external fun vlmRuntimeStats(handle: Long): RuntimeStats?
 }
