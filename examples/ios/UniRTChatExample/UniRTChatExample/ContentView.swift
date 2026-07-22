@@ -14,6 +14,7 @@ private enum Theme {
 
 struct ContentView: View {
     @StateObject private var viewModel = ChatViewModel()
+    @FocusState private var isInputFocused: Bool
 
     var body: some View {
         ZStack {
@@ -170,9 +171,16 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
                     .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke(Color.white.opacity(0.08)))
                     .accessibilityLabel("Ask something...")
-                    .onSubmit { viewModel.send() }
+                    .focused($isInputFocused)
+                    .onSubmit {
+                        isInputFocused = false
+                        viewModel.send()
+                    }
 
-                Button("Send") { viewModel.send() }
+                Button("Send") {
+                    isInputFocused = false
+                    viewModel.send()
+                }
                     .font(.system(.footnote, design: .monospaced)).bold()
                     .foregroundStyle(Theme.bg)
                     .padding(.horizontal, 16)
