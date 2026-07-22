@@ -19,7 +19,7 @@ final class ChatUITests: XCTestCase {
         field.tap()
         for ch in text {
             field.typeText(String(ch))
-            Thread.sleep(forTimeInterval: 0.09)
+            Thread.sleep(forTimeInterval: 0.05)
         }
         Thread.sleep(forTimeInterval: 0.6)
     }
@@ -39,7 +39,11 @@ final class ChatUITests: XCTestCase {
         return matched
     }
 
-    func testTextModeProducesAssistantReply() throws {
+    /// One continuous session — Text mode then, without relaunching the app,
+    /// switch the segmented picker to Vision mode. Keeps the whole demo (and
+    /// any screen recording of it) as a single unbroken app session instead
+    /// of visibly leaving and re-entering the app between modes.
+    func testTextThenVisionInOneSession() throws {
         let app = XCUIApplication()
         app.launch()
         _ = waitForReady(app)
@@ -55,19 +59,13 @@ final class ChatUITests: XCTestCase {
 
         app.buttons["Send"].tap()
 
-        let reply = waitForReply(app, containing: ["paris"], timeout: 60)
-        XCTAssertFalse(reply.isEmpty, "no reply mentioning Paris appeared in time")
-    }
-
-    func testVisionModeDescribesAttachedImage() throws {
-        let app = XCUIApplication()
-        app.launch()
-        _ = waitForReady(app)
+        let textReply = waitForReply(app, containing: ["paris"], timeout: 60)
+        XCTAssertFalse(textReply.isEmpty, "no reply mentioning Paris appeared in time")
+        Thread.sleep(forTimeInterval: 2.5) // hold the finished reply on screen before switching modes
 
         app.segmentedControls["modePicker"].buttons["Vision"].tap()
         _ = waitForReady(app)
 
-        let deviceValue = app.staticTexts["deviceStatValue"]
         if deviceValue.waitForExistence(timeout: 5) {
             print("UNIRT device (vision): \(deviceValue.label)")
         }
@@ -76,15 +74,14 @@ final class ChatUITests: XCTestCase {
         app.buttons["attachButton"].tap()
         Thread.sleep(forTimeInterval: 0.6)
 
-        let input = app.textFields["Ask something..."]
-        XCTAssertTrue(input.waitForExistence(timeout: 5))
         typeSlowly("What do you see in this image?", into: input)
 
         app.buttons["Send"].tap()
 
         // test-photo.jpg is a synthetic scene: red house, green field,
         // mountains, yellow sun.
-        let reply = waitForReply(app, containing: ["house", "mountain", "sun", "field", "green", "sky"], timeout: 90)
-        XCTAssertFalse(reply.isEmpty, "no reply describing the test image appeared in time")
+        let visionReply = waitForReply(app, containing: ["house", "mountain", "sun", "field", "green", "sky"], timeout: 90)
+        XCTAssertFalse(visionReply.isEmpty, "no reply describing the test image appeared in time")
+        Thread.sleep(forTimeInterval: 3) // hold the finished reply on screen before the test (and app) exits
     }
 }
