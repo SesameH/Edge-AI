@@ -20,6 +20,11 @@ examples/ios/UniRTChatExample/UniRTChatExample.xcodeproj/
 examples/ios/UniRTChatExample/UniRTChatExample/Info.plist
 examples/ios/UniRTChatExample/Resources/*.gguf
 
+# Android example app: bundled test models are downloads (see its README);
+# .kotlin/ is Kotlin compiler session state, same class as .gradle/
+examples/android/UniRTChatExample/app/src/main/assets/*.gguf
+.kotlin/
+
 # Xcode per-user state (scheme management, breakpoints) — not project config
 **/xcuserdata/
 

@@ -139,6 +139,13 @@ jobs:
           # unirt-sdk's Swift package lives at ios/, not bindings/ios/
           sed -i 's#path: \.\./\.\./\.\./bindings/ios#path: ../../../ios#' \
             unirt-sdk/examples/ios/UniRTChatExample/project.yml
+          rsync -a --delete \
+            --exclude '*.gguf' --exclude 'build' --exclude '.gradle' \
+            --exclude '.cxx' --exclude '.kotlin' --exclude 'local.properties' \
+            core/examples/android/UniRTChatExample/ unirt-sdk/examples/android/UniRTChatExample/
+          # unirt-sdk's Android library module lives at android/, not bindings/android/
+          sed -i 's#bindings/android/build/outputs#android/build/outputs#' \
+            unirt-sdk/examples/android/UniRTChatExample/app/build.gradle.kts
       - name: Commit source sync
         run: |
           cd unirt-sdk
