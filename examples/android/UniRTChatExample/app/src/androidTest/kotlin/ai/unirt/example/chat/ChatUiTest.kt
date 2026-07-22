@@ -3,6 +3,7 @@
 
 package ai.unirt.example.chat
 
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -73,5 +74,16 @@ class ChatUiTest {
             listOf("house", "mountain", "sun", "field", "green", "sky"),
             timeoutMs = 600_000,
         )
+        waitForReady(timeoutMs = 600_000)
+
+        // Follow-up turn with NO new image: the transcript now contains the
+        // previous turn's image marker, which regressed once with "prompt has
+        // N media markers but M files were supplied" (shown as a bare
+        // "error: UniRT error -1"). send() sets status to "generating..."
+        // synchronously, so waitForReady below cannot pass early.
+        compose.onNodeWithTag("inputField").performTextInput("What color is the house?")
+        compose.onNodeWithTag("sendButton").performClick()
+        waitForReady(timeoutMs = 600_000)
+        compose.onAllNodes(hasText("error:", substring = true)).assertCountEquals(0)
     }
 }
