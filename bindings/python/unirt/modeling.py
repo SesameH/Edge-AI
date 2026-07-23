@@ -11,6 +11,7 @@ their native struct types and modality-specific operations.
 from __future__ import annotations
 
 import codecs
+import json
 import math
 import os
 import threading
@@ -107,6 +108,7 @@ def _build_sampler(
     seed: int,
     grammar: str | None,
     json_mode: bool,
+    json_schema: dict | str | None = None,
 ) -> unirt_SamplerConfig:
     if not isinstance(top_k, int) or isinstance(top_k, bool):
         raise TypeError('top_k must be an integer')
@@ -134,8 +136,13 @@ def _build_sampler(
         raise ValueError('top_p and min_p must be between 0 and 1')
     if top_k < 0 or repetition_penalty < 0:
         raise ValueError('top_k and repetition_penalty cannot be negative')
-    if grammar and json_mode:
-        raise ValueError('grammar and json_mode are mutually exclusive')
+    if json_schema is not None:
+        if isinstance(json_schema, dict):
+            json_schema = json.dumps(json_schema)
+        if not isinstance(json_schema, str) or '\x00' in json_schema:
+            raise ValueError('json_schema must be a dict or a NUL-free JSON string')
+    if sum(1 for active in (grammar, json_mode, json_schema) if active) > 1:
+        raise ValueError('grammar, json_mode and json_schema are mutually exclusive')
 
     return unirt_SamplerConfig(
         temperature=temperature,
@@ -148,6 +155,7 @@ def _build_sampler(
         seed=seed,
         grammar_string=_enc(grammar),
         enable_json=json_mode,
+        json_schema=_enc(json_schema),
     )
 
 
@@ -456,6 +464,7 @@ class UniRTLLM(_NativeModel):
         stop: list[str] | None = None,
         grammar: str | None = None,
         json_mode: bool = False,
+        json_schema: dict | str | None = None,
         stream: bool = False,
         sliding_window: bool = False,
         sliding_window_n_keep: int = 0,
@@ -484,6 +493,7 @@ class UniRTLLM(_NativeModel):
             seed,
             grammar,
             json_mode,
+            json_schema,
         )
         config, *arrays = _build_gen_config(
             max_new_tokens,
@@ -690,6 +700,7 @@ class UniRTVLM(_NativeModel):
         stop: list[str] | None = None,
         grammar: str | None = None,
         json_mode: bool = False,
+        json_schema: dict | str | None = None,
         images: list[str] | None = None,
         audios: list[str] | None = None,
         stream: bool = False,
@@ -744,6 +755,7 @@ class UniRTVLM(_NativeModel):
             seed,
             grammar,
             json_mode,
+            json_schema,
         )
         config, *arrays = _build_gen_config(
             max_new_tokens,

@@ -75,7 +75,8 @@ internal class NativeVlmSession private constructor(
         requireOpen(), prompt, options.maxTokens, options.temperature,
         options.topP, options.topK, options.seed,
         options.imagePaths.toTypedArray(), options.audioPaths.toTypedArray(),
-        options.imageMaxLength, onToken,
+        options.imageMaxLength, options.grammar, options.jsonMode,
+        options.jsonSchema, onToken,
     ) ?: raise()
 
     override suspend fun capabilities(): VlmCapabilities =

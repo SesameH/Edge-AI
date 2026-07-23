@@ -88,6 +88,7 @@ class unirt_SamplerConfig(Structure):
         ('grammar_path', c_char_p),
         ('grammar_string', c_char_p),
         ('enable_json', c_bool),
+        ('json_schema', c_char_p),
     ]
 
 

@@ -20,6 +20,7 @@
 #include "generation_state.h"
 #include "logging.h"
 #include "device_label.h"
+#include "schema_grammar.h"
 
 namespace unirt::llama_plugin {
 
@@ -421,7 +422,8 @@ SamplerPtr LlamaCppVlm::make_sampler(
         const int grammar_sources =
             (config->grammar_string && config->grammar_string[0] ? 1 : 0) +
             (config->grammar_path && config->grammar_path[0] ? 1 : 0) +
-            (config->enable_json ? 1 : 0);
+            (config->enable_json ? 1 : 0) +
+            (config->json_schema && config->json_schema[0] ? 1 : 0);
         if (grammar_sources > 1) {
             error = UNIRT_ERROR_COMMON_INVALID_INPUT;
             return {};
@@ -435,6 +437,9 @@ SamplerPtr LlamaCppVlm::make_sampler(
             }
         } else if (config->enable_json) {
             grammar = kJsonGrammar;
+        } else if (config->json_schema && config->json_schema[0]) {
+            grammar = schema_to_gbnf(config->json_schema, error);
+            if (grammar.empty()) return {};
         }
     }
     if (!grammar.empty()) {

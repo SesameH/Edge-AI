@@ -206,14 +206,20 @@ JNIEXPORT jstring JNICALL Java_ai_unirt_Native_llmApplyChatTemplate(
 
 JNIEXPORT jobject JNICALL Java_ai_unirt_Native_llmGenerate(
     JNIEnv* env, jclass, jlong handle, jstring prompt, jint max_tokens, jfloat temperature,
-    jfloat top_p, jint top_k, jint seed, jobject on_token) {
+    jfloat top_p, jint top_k, jint seed, jstring grammar, jboolean json_mode,
+    jstring json_schema, jobject on_token) {
     const std::string prompt_text = as_utf8(env, prompt);
+    const std::string grammar_text = as_utf8(env, grammar);
+    const std::string schema_text  = as_utf8(env, json_schema);
 
     unirt_SamplerConfig sampler{};
     sampler.temperature = temperature;
     sampler.top_p       = top_p;
     sampler.top_k       = top_k;
     sampler.seed        = seed;
+    sampler.grammar_string = grammar_text.empty() ? nullptr : grammar_text.c_str();
+    sampler.enable_json    = json_mode == JNI_TRUE;
+    sampler.json_schema    = schema_text.empty() ? nullptr : schema_text.c_str();
 
     unirt_GenerationConfig config{};
     config.max_tokens     = max_tokens;
@@ -379,14 +385,20 @@ JNIEXPORT jstring JNICALL Java_ai_unirt_Native_vlmApplyChatTemplate(
 JNIEXPORT jobject JNICALL Java_ai_unirt_Native_vlmGenerate(
     JNIEnv* env, jclass, jlong handle, jstring prompt, jint max_tokens, jfloat temperature,
     jfloat top_p, jint top_k, jint seed, jobjectArray image_paths, jobjectArray audio_paths,
-    jint image_max_length, jobject on_token) {
+    jint image_max_length, jstring grammar, jboolean json_mode, jstring json_schema,
+    jobject on_token) {
     const std::string prompt_text = as_utf8(env, prompt);
+    const std::string grammar_text = as_utf8(env, grammar);
+    const std::string schema_text  = as_utf8(env, json_schema);
 
     unirt_SamplerConfig sampler{};
     sampler.temperature = temperature;
     sampler.top_p       = top_p;
     sampler.top_k       = top_k;
     sampler.seed        = seed;
+    sampler.grammar_string = grammar_text.empty() ? nullptr : grammar_text.c_str();
+    sampler.enable_json    = json_mode == JNI_TRUE;
+    sampler.json_schema    = schema_text.empty() ? nullptr : schema_text.c_str();
 
     const jsize image_count = image_paths ? env->GetArrayLength(image_paths) : 0;
     const jsize audio_count = audio_paths ? env->GetArrayLength(audio_paths) : 0;

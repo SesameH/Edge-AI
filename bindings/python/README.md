@@ -71,6 +71,28 @@ prefilling the supplied prompt). To continue from a known cached prefix, pass
 the exact prefix length through `n_past`; invalid values are rejected rather
 than silently duplicating context.
 
+## Structured output
+
+Constrain decoding so the reply is guaranteed to parse — the grammar masks
+invalid tokens at every step, which makes even small models reliable JSON
+emitters (llama_cpp backend; MLX rejects these options):
+
+```python
+schema = {'type': 'object',
+          'properties': {'city': {'type': 'string'}, 'country': {'type': 'string'}},
+          'required': ['city', 'country']}
+out = model.generate('Facts about the capital of France as JSON.',
+                     json_schema=schema)      # dict or serialized JSON string
+data = json.loads(out.text)                    # always parses
+
+model.generate(prompt, json_mode=True)         # any syntactically valid JSON
+model.generate(prompt, grammar='root ::= ...')  # raw GBNF
+```
+
+The server accepts the OpenAI `response_format` field with types
+`json_object` and `json_schema`. Note a `length` finish can still truncate
+mid-object — budget `max_tokens` accordingly.
+
 ## OpenAI-compatible server
 
 ```sh

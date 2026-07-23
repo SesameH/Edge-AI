@@ -73,7 +73,8 @@ internal class NativeLlmSession private constructor(
         onToken: TokenCallback?,
     ): LlmGenerateResult = Native.llmGenerate(
         requireOpen(), prompt, options.maxTokens, options.temperature,
-        options.topP, options.topK, options.seed, onToken,
+        options.topP, options.topK, options.seed, options.grammar,
+        options.jsonMode, options.jsonSchema, onToken,
     ) ?: raise()
 
     override suspend fun applyChatTemplate(

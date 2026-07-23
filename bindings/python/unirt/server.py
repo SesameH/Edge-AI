@@ -90,6 +90,28 @@ def _parse_generation_args(req: dict) -> dict:
         ):
             raise ValueError('stop must be a string or an array of strings')
         result['stop'] = stop
+
+    # OpenAI structured outputs: {"type": "json_object"} constrains to
+    # syntactically valid JSON; {"type": "json_schema", "json_schema":
+    # {"schema": {...}}} constrains decoding to the schema itself.
+    response_format = req.get('response_format')
+    if response_format is not None:
+        if not isinstance(response_format, dict):
+            raise ValueError('response_format must be an object')
+        kind = response_format.get('type')
+        if kind == 'text':
+            pass
+        elif kind == 'json_object':
+            result['json_mode'] = True
+        elif kind == 'json_schema':
+            wrapper = response_format.get('json_schema')
+            if not isinstance(wrapper, dict) or not isinstance(wrapper.get('schema'), dict):
+                raise ValueError(
+                    "response_format.json_schema must be an object with a 'schema' object"
+                )
+            result['json_schema'] = wrapper['schema']
+        else:
+            raise ValueError("response_format.type must be 'text', 'json_object' or 'json_schema'")
     return result
 
 

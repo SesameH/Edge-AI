@@ -423,8 +423,8 @@ typedef struct {
 /**
  * Sampling controls. Zero-initialize, then set what you need; a temperature
  * of 0 (or below) selects greedy decoding. At most one of grammar_path /
- * grammar_string / enable_json may be active — they all constrain output
- * through the same grammar slot.
+ * grammar_string / enable_json / json_schema may be active — they all
+ * constrain output through the same grammar slot.
  */
 typedef struct {
     float       temperature;        /* Softmax temperature; <=0 = greedy */
@@ -438,6 +438,12 @@ typedef struct {
     unirt_Path grammar_path;       /* Constrain output with a grammar file (optional) */
     const char* grammar_string;     /* Constrain output with an inline grammar (optional) */
     bool        enable_json;        /* Constrain output to JSON */
+    /* Constrain output to a JSON Schema (UTF-8 JSON text, optional). The
+     * plugin compiles it to a grammar; generated text is guaranteed to
+     * parse and to validate against the schema's supported subset.
+     * Appended for 0.2: native libraries and bindings ship in lock-step
+     * (wheel/AAR/XCFramework bundle both sides), so tail growth is safe. */
+    const char* json_schema;
 } unirt_SamplerConfig;
 
 /**

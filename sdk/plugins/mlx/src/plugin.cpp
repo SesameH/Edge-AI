@@ -219,7 +219,8 @@ class MlxLlm : public LlmBackend {
         if (sampler_config &&
             ((sampler_config->grammar_path && sampler_config->grammar_path[0]) ||
              (sampler_config->grammar_string && sampler_config->grammar_string[0]) ||
-             sampler_config->enable_json)) {
+             sampler_config->enable_json ||
+             (sampler_config->json_schema && sampler_config->json_schema[0]))) {
             UNIRT_LOG_ERROR("mlx: grammar/JSON constrained decoding is not implemented");
             return UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED;
         }

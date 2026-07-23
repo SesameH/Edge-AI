@@ -51,6 +51,12 @@ data class VlmGenerateOptions(
     val audioPaths: List<String> = emptyList(),
     /** Cap on the longest image edge; 0 = no resize. */
     val imageMaxLength: Int = 0,
+    /** Inline GBNF grammar constraining the output. */
+    val grammar: String? = null,
+    /** Constrain the output to syntactically valid JSON. */
+    val jsonMode: Boolean = false,
+    /** JSON Schema (serialized JSON text) the output must conform to. */
+    val jsonSchema: String? = null,
 )
 
 /**

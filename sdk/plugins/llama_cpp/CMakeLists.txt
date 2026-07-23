@@ -4,7 +4,11 @@ set(GGML_BLAS OFF)
 set(GGML_NATIVE OFF)
 set(GGML_BACKEND_DL OFF)
 
-set(LLAMA_BUILD_COMMON OFF)
+# common is needed solely for json_schema_to_grammar() (JSON Schema →
+# GBNF); everything else still goes through the public llama.h/mtmd API.
+# CACHE FORCE: llama.cpp declares this with option(), which a plain set()
+# in the parent scope does not override.
+set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 set(LLAMA_CURL OFF)
 set(LLAMA_BUILD_TESTS OFF)
 set(LLAMA_BUILD_TOOLS OFF)
@@ -32,7 +36,7 @@ add_subdirectory(./src)
 
 # Install the llama.cpp runtime dylibs next to the plugin so @loader_path /
 # $ORIGIN resolution works in the installed layout.
-set(LLAMA_LIBS mtmd llama ggml ggml-base ggml-cpu ggml-metal ggml-blas ggml-vulkan ggml-cuda)
+set(LLAMA_LIBS mtmd llama llama-common ggml ggml-base ggml-cpu ggml-metal ggml-blas ggml-vulkan ggml-cuda)
 foreach(dep IN LISTS LLAMA_LIBS)
     if(TARGET ${dep})
         # unversioned file names, so the plugin's install_name matches

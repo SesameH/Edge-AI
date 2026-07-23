@@ -49,13 +49,21 @@ data class ChatMessage(val role: String, val content: String) {
     }
 }
 
-/** Sampling controls; the defaults mean greedy decoding. */
+/** Sampling controls; the defaults mean greedy decoding. At most one of
+ *  [grammar] / [jsonMode] / [jsonSchema] may be set — they all constrain
+ *  decoding through the same grammar slot. */
 data class GenerateOptions(
     val maxTokens: Int = 512,
     val temperature: Float = 0f,
     val topP: Float = 0f,
     val topK: Int = 0,
     val seed: Int = 0,
+    /** Inline GBNF grammar constraining the output. */
+    val grammar: String? = null,
+    /** Constrain the output to syntactically valid JSON. */
+    val jsonMode: Boolean = false,
+    /** JSON Schema (serialized JSON text) the output must conform to. */
+    val jsonSchema: String? = null,
 )
 
 class UniRTException(val code: Int, detail: String) :

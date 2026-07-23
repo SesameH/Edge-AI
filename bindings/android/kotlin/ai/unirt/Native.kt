@@ -31,7 +31,8 @@ internal object Native {
     ): String?
     @JvmStatic external fun llmGenerate(
         handle: Long, prompt: String, maxTokens: Int, temperature: Float, topP: Float,
-        topK: Int, seed: Int, onToken: TokenCallback?,
+        topK: Int, seed: Int, grammar: String?, jsonMode: Boolean, jsonSchema: String?,
+        onToken: TokenCallback?,
     ): LlmGenerateResult?
     @JvmStatic external fun llmRuntimeStats(handle: Long): RuntimeStats?
 
@@ -53,7 +54,8 @@ internal object Native {
     @JvmStatic external fun vlmGenerate(
         handle: Long, prompt: String, maxTokens: Int, temperature: Float, topP: Float,
         topK: Int, seed: Int, imagePaths: Array<String>, audioPaths: Array<String>,
-        imageMaxLength: Int, onToken: TokenCallback?,
+        imageMaxLength: Int, grammar: String?, jsonMode: Boolean, jsonSchema: String?,
+        onToken: TokenCallback?,
     ): LlmGenerateResult?
     @JvmStatic external fun vlmRuntimeStats(handle: Long): RuntimeStats?
 }

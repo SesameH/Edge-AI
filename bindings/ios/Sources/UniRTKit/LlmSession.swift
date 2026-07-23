@@ -160,10 +160,15 @@ public actor LlmSession {
         sampler.top_p = options.topP
         sampler.top_k = options.topK
         sampler.seed = options.seed
+        sampler.enable_json = options.jsonMode
 
         var config = unirt_GenerationConfig()
         config.max_tokens = options.maxTokens
 
+        return try withOptionalCString(options.grammar) { grammarPtr -> String in
+        try withOptionalCString(options.jsonSchema) { schemaPtr -> String in
+        sampler.grammar_string = grammarPtr
+        sampler.json_schema = schemaPtr
         return try prompt.withCString { promptPtr -> String in
             try withUnsafeMutablePointer(to: &sampler) { samplerPtr -> String in
                 config.sampler_config = samplerPtr
@@ -188,14 +193,16 @@ public actor LlmSession {
                 }
             }
         }
+        }
+        }
     }
 }
 
 /// Runs `body` with `value` as a live C string pointer, or `nil` when
 /// `value` is `nil` — `String.withCString` has no nil-friendly overload.
-func withOptionalCString<R>(_ value: String?, _ body: (UnsafePointer<CChar>?) -> R) -> R {
-    guard let value else { return body(nil) }
-    return value.withCString(body)
+func withOptionalCString<R>(_ value: String?, _ body: (UnsafePointer<CChar>?) throws -> R) rethrows -> R {
+    guard let value else { return try body(nil) }
+    return try value.withCString(body)
 }
 
 /// Runs `body` with an array of live C string pointers, one per element,

@@ -60,6 +60,12 @@ public struct VlmGenerateOptions: Sendable {
     public var audioPaths: [String]
     /// Cap on the longest image edge; 0 = no resize.
     public var imageMaxLength: Int32
+    /// Inline GBNF grammar constraining the output (optional).
+    public var grammar: String?
+    /// Constrain the output to syntactically valid JSON.
+    public var jsonMode: Bool
+    /// JSON Schema (serialized JSON text) the output must conform to.
+    public var jsonSchema: String?
 
     public init(
         maxTokens: Int32 = 512,
@@ -69,7 +75,10 @@ public struct VlmGenerateOptions: Sendable {
         seed: Int32 = 0,
         imagePaths: [String] = [],
         audioPaths: [String] = [],
-        imageMaxLength: Int32 = 0
+        imageMaxLength: Int32 = 0,
+        grammar: String? = nil,
+        jsonMode: Bool = false,
+        jsonSchema: String? = nil
     ) {
         self.maxTokens = maxTokens
         self.temperature = temperature
@@ -79,6 +88,9 @@ public struct VlmGenerateOptions: Sendable {
         self.imagePaths = imagePaths
         self.audioPaths = audioPaths
         self.imageMaxLength = imageMaxLength
+        self.grammar = grammar
+        self.jsonMode = jsonMode
+        self.jsonSchema = jsonSchema
     }
 }
 
@@ -229,11 +241,16 @@ public actor VlmSession {
         sampler.top_p = options.topP
         sampler.top_k = options.topK
         sampler.seed = options.seed
+        sampler.enable_json = options.jsonMode
 
         var config = unirt_GenerationConfig()
         config.max_tokens = options.maxTokens
         config.image_max_length = options.imageMaxLength
 
+        return try withOptionalCString(options.grammar) { grammarPtr -> String in
+        try withOptionalCString(options.jsonSchema) { schemaPtr -> String in
+        sampler.grammar_string = grammarPtr
+        sampler.json_schema = schemaPtr
         return try prompt.withCString { promptPtr -> String in
             try withCStringArray(options.imagePaths) { imagePtrs -> String in
                 try withCStringArray(options.audioPaths) { audioPtrs -> String in
@@ -269,6 +286,8 @@ public actor VlmSession {
                     }
                 }
             }
+        }
+        }
         }
     }
 }
