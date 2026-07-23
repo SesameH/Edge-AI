@@ -36,6 +36,21 @@ jobs:
         run: |
           mkdir -p publish
           tar -C sdk/pkg-unirt -czf publish/unirt-python-native-macos-arm64.tar.gz lib
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build + smoke-test macOS arm64 wheel
+        run: |
+          set -e
+          python3 -m pip install --quiet build wheel
+          python3 bindings/python/build_wheel.py \
+            --native-prefix sdk/pkg-unirt \
+            --version "${GITHUB_REF_NAME#v}" \
+            --platform-tag macosx_14_0_arm64 \
+            --output-dir publish
+          python3 -m venv wheel-smoke
+          wheel-smoke/bin/python -m pip install --no-deps publish/*.whl
+          wheel-smoke/bin/python bindings/python/smoke_installed_wheel.py
       - name: Build UniRT.xcframework
         run: >
           cmake -S bindings/ios/framework -B build-ios-framework-sim -DCMAKE_BUILD_TYPE=Release
@@ -62,6 +77,134 @@ jobs:
           path: |
             publish/unirt-python-native-macos-arm64.tar.gz
             publish/unirt-ios-xcframework.zip
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: publish-wheel-macos-arm64
+          path: publish/*.whl
+          retention-days: 7
+
+  build-python-linux:
+    name: Python wheel (${{ matrix.platform_tag }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            image: quay.io/pypa/manylinux_2_28_x86_64
+            arch: x86_64
+            platform_tag: manylinux_2_28_x86_64
+          - runner: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux_2_28_aarch64
+            arch: aarch64
+            platform_tag: manylinux_2_28_aarch64
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.image }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch llama.cpp submodule
+        run: git submodule update --init --depth 1 third-party/llama.cpp
+      - name: Select manylinux Python + install build tools
+        run: |
+          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+          /opt/python/cp312-cp312/bin/python -m pip install --quiet \
+            auditwheel build cmake ninja wheel
+      - name: Build + install native runtime
+        run: |
+          cmake -S sdk -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUNIRT_PLUGIN_MLX=OFF \
+            -DUNIRT_PLUGIN_ONNXRUNTIME=OFF \
+            -DUNIRT_NATIVE_TESTS=OFF \
+            -DUNIRT_PYTHON_TESTS=OFF
+          cmake --build build -j4
+          cmake --install build --prefix sdk/pkg-unirt
+      - name: Build + audit + smoke-test wheel
+        run: |
+          set -e
+          python bindings/python/build_wheel.py \
+            --native-prefix sdk/pkg-unirt \
+            --version "${GITHUB_REF_NAME#v}" \
+            --platform-tag "${{ matrix.platform_tag }}" \
+            --output-dir publish
+          auditwheel show publish/*.whl
+          python -m venv wheel-smoke
+          wheel-smoke/bin/python -m pip install --no-deps publish/*.whl
+          wheel-smoke/bin/python bindings/python/smoke_installed_wheel.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: publish-wheel-linux-${{ matrix.arch }}
+          path: publish/*.whl
+          retention-days: 7
+
+  build-python-windows:
+    name: Python wheel (${{ matrix.platform_tag }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x64
+            platform_tag: win_amd64
+            cmake_flags: -G Ninja -DCMAKE_BUILD_TYPE=Release
+          - runner: windows-11-arm
+            arch: arm64
+            platform_tag: win_arm64
+            cmake_flags: >-
+              -G "Ninja Multi-Config"
+              -DCMAKE_TOOLCHAIN_FILE=../third-party/llama.cpp/cmake/arm64-windows-llvm.cmake
+              "-DCMAKE_C_FLAGS=--target=arm64-pc-windows-msvc -march=armv8.7-a"
+              "-DCMAKE_CXX_FLAGS=--target=arm64-pc-windows-msvc -march=armv8.7-a"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch llama.cpp submodule
+        run: git submodule update --init --depth 1 third-party/llama.cpp
+      - name: MSVC environment (x64)
+        if: matrix.arch == 'x64'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install Ninja + LLVM (arm64)
+        if: matrix.arch == 'arm64'
+        run: |
+          choco install ninja llvm -y
+          Add-Content $env:GITHUB_PATH "C:\Program Files\LLVM\bin"
+          Add-Content $env:GITHUB_PATH "C:\ProgramData\chocolatey\bin"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python build tools
+        run: python -m pip install --quiet build delvewheel wheel
+      - name: Build + install native runtime
+        run: >
+          cmake -S sdk -B build ${{ matrix.cmake_flags }}
+          -DUNIRT_PLUGIN_MLX=OFF
+          -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
+          -DUNIRT_NATIVE_TESTS=OFF
+          -DUNIRT_PYTHON_TESTS=OFF
+          &&
+          cmake --build build --config Release -j 4
+          &&
+          cmake --install build --config Release --prefix sdk/pkg-unirt
+      - name: Build + inspect + smoke-test wheel
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          python bindings/python/build_wheel.py `
+            --native-prefix sdk/pkg-unirt `
+            --version $version `
+            --platform-tag "${{ matrix.platform_tag }}" `
+            --output-dir publish
+          $wheel = Get-ChildItem publish\*.whl | Select-Object -First 1
+          python -m delvewheel show $wheel.FullName
+          python -m venv wheel-smoke
+          & wheel-smoke\Scripts\python -m pip install --no-deps $wheel.FullName
+          & wheel-smoke\Scripts\python bindings/python/smoke_installed_wheel.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: publish-wheel-windows-${{ matrix.arch }}
+          path: publish/*.whl
           retention-days: 7
 
   build-android:
@@ -98,7 +241,8 @@ jobs:
 
   publish:
     name: Sync wrapper source + release on unirt-sdk
-    needs: [build-macos-ios, build-android]
+    needs:
+      [build-macos-ios, build-python-linux, build-python-windows, build-android]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -113,6 +257,11 @@ jobs:
         with:
           name: publish-android
           path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: publish-wheel-*
+          path: wheels
+          merge-multiple: true
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.UNIRT_SDK_REPO }}
@@ -168,26 +317,6 @@ jobs:
       - name: Build the AAR
         run: ./gradlew assembleRelease --console=plain
         working-directory: unirt-sdk/android
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Build macOS arm64 wheel (native libs bundled)
-        run: |
-          set -e
-          python3 -m pip install --quiet build wheel
-          tar -C core/bindings/python/unirt -xzf artifacts/unirt-python-native-macos-arm64.tar.gz
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^VERSION = .*/VERSION = (${VERSION//./, })/" core/bindings/python/unirt/_version.py
-          cd core/bindings/python
-          python3 -m build --wheel
-          # The wheel is pure-Python plus prebuilt dylibs, so build tags it
-          # py3-none-any; retag to the platform the dylibs were built for.
-          python3 -m wheel tags --platform-tag macosx_14_0_arm64 --remove dist/*.whl
-      - uses: actions/upload-artifact@v4
-        with:
-          name: publish-wheel
-          path: core/bindings/python/dist/*.whl
-          retention-days: 7
       - name: Locate release assets
         run: |
           set -e
@@ -195,7 +324,7 @@ jobs:
           cp "$(find unirt-sdk/android/build/outputs/aar -name '*.aar')" release-assets/unirt-android.aar
           cp artifacts/unirt-python-native-macos-arm64.tar.gz release-assets/
           cp artifacts/unirt-ios-xcframework.zip release-assets/
-          cp core/bindings/python/dist/*.whl release-assets/
+          cp wheels/*.whl release-assets/
       - name: Create GitHub Release on unirt-sdk
         env:
           GH_TOKEN: ${{ secrets.UNIRT_SDK_PUSH_TOKEN }}
@@ -224,8 +353,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: publish-wheel
+          pattern: publish-wheel-*
           path: dist
+          merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
