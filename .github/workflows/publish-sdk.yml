@@ -11,6 +11,7 @@ on:
 
 env:
   UNIRT_SDK_REPO: SesameH/unirt-sdk
+  GGUF_URL: https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
 
 jobs:
   build-macos-ios:
@@ -201,6 +202,13 @@ jobs:
           python -m venv wheel-smoke
           & wheel-smoke\Scripts\python -m pip install --no-deps $wheel.FullName
           & wheel-smoke\Scripts\python bindings/python/smoke_installed_wheel.py
+      - name: Run inference from the installed wheel
+        # Loading the plugin proves the packaging; only decoding proves the
+        # binary itself runs on Windows, which cross-compilation cannot.
+        run: |
+          & wheel-smoke\Scripts\python -m pip install --quiet huggingface_hub
+          Invoke-WebRequest -Uri $env:GGUF_URL -OutFile smoke-model.gguf
+          & wheel-smoke\Scripts\python bindings/python/smoke_inference_wheel.py smoke-model.gguf
       - uses: actions/upload-artifact@v4
         with:
           name: publish-wheel-windows-${{ matrix.arch }}
