@@ -23,6 +23,7 @@ from typing import Callable, Iterable, Sequence
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.utils import HfHubHTTPError, tqdm as hub_tqdm
 
+from . import catalog
 from ._ffi._api import UniRTError
 
 __all__ = [
@@ -66,7 +67,7 @@ UNIRT_ERROR_COMMON_MANIFEST_PARSE = -1105
 
 _MANIFEST = 'unirt.json'
 _QUANT_PRIORITY = ('Q4_0', 'Q4_K_M', 'Q8_0')
-_ALIASES = {'qwen3': 'ggml-org/Qwen3-1.7B-GGUF:Q4_K_M'}
+_ALIASES = {'qwen3': 'ggml-org/Qwen3-1.7B-GGUF:Q4_K_M', **catalog.aliases()}
 _SIDECAR_SUFFIXES = (
     '.json',
     '.jinja',

@@ -27,6 +27,7 @@ from unirt import (
     set_log_level,
     version,
 )
+from unirt import catalog
 
 _models = unirt.model_manager
 
@@ -529,6 +530,50 @@ def _cmd_ls(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_recommend(arguments: argparse.Namespace) -> int:
+    ram = arguments.ram if arguments.ram > 0 else catalog.total_memory_gib()
+    entries = catalog.recommend(
+        ram_gib=ram,
+        backend=arguments.backend,
+        task=arguments.task,
+        include_oversized=arguments.all,
+    )
+    if ram is None:
+        print(f'{_DIM}(could not read physical memory; showing everything){_RESET}')
+    else:
+        print(f'{_DIM}{ram:.0f} GiB RAM detected'
+              f'{" -- showing all, including models that will not fit" if arguments.all else ""}'
+              f'{_RESET}')
+
+    if not entries:
+        print('No catalog entry fits. Try --all to see everything, or lower --task/--backend.')
+        return 1
+
+    cached = set(_models.list_models())
+    rows = [
+        [
+            entry.alias,
+            entry.task,
+            entry.backend,
+            f'{entry.download_gib:.2f} GiB',
+            f'{entry.min_ram_gib:g} GiB',
+            'yes' if entry.repo in cached else ('TOO BIG' if ram and not entry.fits_in(ram) else ''),
+            entry.note,
+        ]
+        for entry in entries
+    ]
+    _render_table(rows, ['ALIAS', 'TASK', 'BACKEND', 'DOWNLOAD', 'NEEDS', 'CACHED', 'NOTES'])
+    top = entries[0]
+    run = (
+        f'unirt-py embed {top.alias} "some text"'
+        if top.task == 'embed'
+        else f'unirt-py chat {top.alias}'
+    )
+    print(f'\nDownload one with:  unirt-py pull {top.alias}')
+    print(f'Then run it:        {run}')
+    return 0
+
+
 def _cmd_rm(arguments: argparse.Namespace) -> int:
     if arguments.all:
         count = _models.clean()
@@ -617,6 +662,35 @@ def _build_parser() -> argparse.ArgumentParser:
     listing = commands.add_parser('ls', help='List cached models or show one manifest')
     listing.add_argument('model', nargs='?')
     listing.set_defaults(func=_cmd_ls)
+
+    recommend = commands.add_parser(
+        'recommend',
+        help='Suggest models that fit this machine',
+    )
+    recommend.add_argument(
+        '--task',
+        choices=sorted({entry.task for entry in catalog.CATALOG}),
+        default=None,
+        help='Only show models for this task',
+    )
+    recommend.add_argument(
+        '--backend',
+        choices=sorted({entry.backend for entry in catalog.CATALOG}),
+        default=None,
+        help='Only show models this backend can load',
+    )
+    recommend.add_argument(
+        '--ram',
+        type=float,
+        default=0.0,
+        help='Override detected RAM in GiB (e.g. to size for a target device)',
+    )
+    recommend.add_argument(
+        '--all',
+        action='store_true',
+        help='Include models too large for the detected RAM',
+    )
+    recommend.set_defaults(func=_cmd_recommend)
 
     remove = commands.add_parser('rm', help='Remove cached models')
     remove.add_argument('model', nargs='?')
