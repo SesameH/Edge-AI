@@ -277,3 +277,140 @@ def test_server_sheds_load_with_503_when_request_slots_exhausted():
         httpd.shutdown()
         worker.join(timeout=5)
         httpd.server_close()
+
+
+TOOL_CALL_JSON = '{"name": "get_weather", "arguments": {"location": "Taipei"}}'
+
+
+class FakeStreamer:
+    """Emits the constrained output in pieces, like the real streamer."""
+
+    def __init__(self, text: str, output):
+        self._pieces = [text[i:i + 8] for i in range(0, len(text), 8)]
+        self.output = output
+
+    def __iter__(self):
+        return iter(self._pieces)
+
+    def cancel(self):
+        self._pieces = []
+
+
+class FakeToolModel(FakeModel):
+    """Stands in for a grammar-constrained model that decided to call a tool."""
+
+    def generate(self, _prompt, *, stream: bool = False, **_kwargs):
+        profile = SimpleNamespace(stop_reason='eos', prompt_tokens=2, generated_tokens=9)
+        out = SimpleNamespace(text=TOOL_CALL_JSON, profile=profile)
+        return FakeStreamer(TOOL_CALL_JSON, out) if stream else out
+
+
+def _post(httpd, payload: dict):
+    import http.client
+
+    connection = http.client.HTTPConnection('127.0.0.1', httpd.server_address[1], timeout=5)
+    try:
+        body = json.dumps(payload).encode()
+        connection.request(
+            'POST', '/v1/chat/completions', body=body,
+            headers={'Content-Type': 'application/json', 'Content-Length': str(len(body))},
+        )
+        response = connection.getresponse()
+        return response.status, json.loads(response.read())
+    finally:
+        connection.close()
+
+
+def _serving(model):
+    httpd = server.UniRTHTTPServer(('127.0.0.1', 0), model, 'fake-model')
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    return httpd, worker
+
+
+WEATHER_TOOL = {
+    'type': 'function',
+    'function': {
+        'name': 'get_weather',
+        'parameters': {
+            'type': 'object',
+            'properties': {'location': {'type': 'string'}},
+            'required': ['location'],
+        },
+    },
+}
+
+
+def test_tool_call_response_matches_the_openai_shape():
+    httpd, worker = _serving(FakeToolModel())
+    try:
+        status, payload = _post(httpd, {
+            'messages': [{'role': 'user', 'content': 'weather in Taipei?'}],
+            'tools': [WEATHER_TOOL],
+            'tool_choice': 'required',
+        })
+        assert status == 200
+        choice = payload['choices'][0]
+        assert choice['finish_reason'] == 'tool_calls'
+        assert choice['message']['content'] is None
+        call = choice['message']['tool_calls'][0]
+        assert call['function']['name'] == 'get_weather'
+        assert json.loads(call['function']['arguments']) == {'location': 'Taipei'}
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+
+
+def test_tools_and_response_format_cannot_share_the_grammar_slot():
+    httpd, worker = _serving(FakeToolModel())
+    try:
+        status, payload = _post(httpd, {
+            'messages': [{'role': 'user', 'content': 'hi'}],
+            'tools': [WEATHER_TOOL],
+            'response_format': {'type': 'json_object'},
+        })
+        assert status == 400
+        assert 'cannot both constrain' in payload['error']['message']
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+
+
+def test_streaming_tool_call_arrives_as_one_finished_delta():
+    """Half a JSON envelope is useless to a client, so tool turns buffer."""
+    import http.client
+
+    httpd, worker = _serving(FakeToolModel())
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', httpd.server_address[1], timeout=5)
+        try:
+            body = json.dumps({
+                'messages': [{'role': 'user', 'content': 'weather in Taipei?'}],
+                'tools': [WEATHER_TOOL],
+                'tool_choice': 'required',
+                'stream': True,
+            }).encode()
+            connection.request(
+                'POST', '/v1/chat/completions', body=body,
+                headers={'Content-Type': 'application/json', 'Content-Length': str(len(body))},
+            )
+            response = connection.getresponse()
+            events = [
+                json.loads(line[len('data: '):])
+                for line in response.read().decode().splitlines()
+                if line.startswith('data: ') and not line.endswith('[DONE]')
+            ]
+        finally:
+            connection.close()
+        deltas = [event['choices'][0]['delta'] for event in events]
+        calls = [delta['tool_calls'] for delta in deltas if 'tool_calls' in delta]
+        assert len(calls) == 1
+        assert calls[0][0]['index'] == 0
+        assert calls[0][0]['function']['name'] == 'get_weather'
+        assert events[-1]['choices'][0]['finish_reason'] == 'tool_calls'
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()

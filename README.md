@@ -196,6 +196,14 @@ Serves `/v1/chat/completions` (blocking + SSE streaming) and `/v1/models`;
 works with the official `openai` Python client and anything else that speaks
 the OpenAI API (`base_url='http://127.0.0.1:8080/v1'`, any api_key).
 
+`response_format` (`json_object` / `json_schema`) and `tools` + `tool_choice`
+are both honoured by constraining decoding with a grammar, so a tool call from
+a 1B model still names a declared tool and carries arguments that validate
+against that tool's schema. Two limits worth knowing: one call per turn
+(no parallel calls), and a turn cannot use `tools` and `response_format`
+together, since they drive the same grammar slot. Streaming a tool turn sends
+the call as one finished delta rather than character by character.
+
 ## Tests
 
 ```sh

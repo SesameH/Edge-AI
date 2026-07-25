@@ -29,6 +29,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .auto import AutoModelForCausalLM
 from .modeling import UniRTVLM
+from .tool_calling import (
+    apply_tool_prompt,
+    interpret_output,
+    parse_tool_request,
+    rewrite_tool_history,
+)
 
 _MAX_REQUEST_BYTES = 16 * 1024 * 1024
 _MAX_MEDIA_BYTES = 12 * 1024 * 1024
@@ -134,6 +140,22 @@ def _validate_messages(messages) -> list[dict[str, str]]:
             )
         normalized.append({'role': role, 'content': content})
     return normalized
+
+
+def _assistant_message(text: str, finish: str, plan) -> tuple[dict, str]:
+    """Build the assistant message, splitting out a tool call when tools ran."""
+    if plan is None:
+        return {'role': 'assistant', 'content': text}, finish
+    content, tool_calls = interpret_output(text, plan)
+    message: dict = {'role': 'assistant', 'content': content}
+    if tool_calls:
+        message['tool_calls'] = tool_calls
+        # 'length' outranks it: a call cut off by max_tokens never parsed, so
+        # it cannot reach here, and reporting 'tool_calls' on a truncated turn
+        # would tell the client to execute something incomplete.
+        if finish != 'length':
+            finish = 'tool_calls'
+    return message, finish
 
 
 @dataclass
@@ -355,8 +377,23 @@ class Handler(BaseHTTPRequestHandler):
             gen_kwargs = _parse_generation_args(req)
             if not isinstance(req.get('stream', False), bool):
                 raise ValueError('stream must be a boolean')
+            plan = parse_tool_request(req)
+            messages = req.get('messages')
+            # Prior calls and results are flattened whether or not this turn
+            # declares tools: a client that stops sending `tools` mid-thread
+            # still has the earlier tool turns in its transcript.
+            if isinstance(messages, list):
+                messages = rewrite_tool_history(messages)
+            if plan is not None:
+                # Both features drive the plugin's single grammar slot.
+                if gen_kwargs.get('json_schema') is not None or gen_kwargs.get('json_mode'):
+                    raise ValueError(
+                        'tools and response_format cannot both constrain one completion'
+                    )
+                messages = apply_tool_prompt(messages, plan)
+                gen_kwargs['json_schema'] = plan.schema()
             prepared = _prepare_messages(
-                req.get('messages'),
+                messages,
                 multimodal=isinstance(self.server.model, UniRTVLM),
                 capabilities=self.server.capabilities,
             )
@@ -384,9 +421,9 @@ class Handler(BaseHTTPRequestHandler):
                     gen_kwargs['images'] = prepared.images
                     gen_kwargs['audios'] = prepared.audios
                 if req.get('stream'):
-                    self._stream_completion(prompt, gen_kwargs)
+                    self._stream_completion(prompt, gen_kwargs, plan)
                 else:
-                    self._blocking_completion(prompt, gen_kwargs)
+                    self._blocking_completion(prompt, gen_kwargs, plan)
 
             _with_clean_model_state(model, self.server.gen_lock, generate_response)
         except (BrokenPipeError, ConnectionResetError):
@@ -402,10 +439,11 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- completion modes ----
 
-    def _blocking_completion(self, prompt: str, gen_kwargs: dict) -> None:
+    def _blocking_completion(self, prompt: str, gen_kwargs: dict, plan=None) -> None:
         out = self.server.model.generate(prompt, **gen_kwargs)
         p = out.profile
         finish = 'stop' if p.stop_reason in ('eos', 'stop_sequence') else 'length'
+        message, finish = _assistant_message(out.text, finish, plan)
         self._json(200, {
             'id': _completion_id(),
             'object': 'chat.completion',
@@ -413,7 +451,7 @@ class Handler(BaseHTTPRequestHandler):
             'model': self.server.model_id,
             'choices': [{
                 'index': 0,
-                'message': {'role': 'assistant', 'content': out.text},
+                'message': message,
                 'finish_reason': finish,
             }],
             'usage': {
@@ -423,7 +461,7 @@ class Handler(BaseHTTPRequestHandler):
             },
         })
 
-    def _stream_completion(self, prompt: str, gen_kwargs: dict) -> None:
+    def _stream_completion(self, prompt: str, gen_kwargs: dict, plan=None) -> None:
         self.send_response(200)
         self._cors()
         self.send_header('Content-Type', 'text/event-stream')
@@ -449,9 +487,16 @@ class Handler(BaseHTTPRequestHandler):
 
         send_chunk(delta({'role': 'assistant', 'content': ''}))
         streamer = self.server.model.generate(prompt, stream=True, **gen_kwargs)
+        # With tools the token stream is a half-written JSON envelope, not
+        # anything a client can render, so those pieces are accumulated and
+        # emitted once as a finished delta. Plain turns still stream live.
+        buffered: list[str] = []
         try:
             for piece in streamer:
-                send_chunk(delta({'content': piece}))
+                if plan is None:
+                    send_chunk(delta({'content': piece}))
+                else:
+                    buffered.append(piece)
         except (BrokenPipeError, ConnectionResetError):
             streamer.cancel()
             try:
@@ -462,6 +507,14 @@ class Handler(BaseHTTPRequestHandler):
             raise
         out = streamer.output
         finish = 'stop' if out and out.profile.stop_reason in ('eos', 'stop_sequence') else 'length'
+        if plan is not None:
+            message, finish = _assistant_message(''.join(buffered), finish, plan)
+            payload = {'content': message['content']}
+            if message.get('tool_calls'):
+                payload['tool_calls'] = [
+                    {'index': index, **call} for index, call in enumerate(message['tool_calls'])
+                ]
+            send_chunk(delta(payload))
         send_chunk(delta({}, finish=finish))
         done = b'data: [DONE]\n\n'
         self.wfile.write(f'{len(done):x}\r\n'.encode() + done + b'\r\n')
