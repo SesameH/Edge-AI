@@ -16,6 +16,32 @@ env:
   GGUF_URL: https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
 
 jobs:
+  python-floor:
+    # Literal, not ${{ env.PYTHON_FLOOR }}: the env context is not available in
+    # a job's `name`, so the interpolation would render as an empty string.
+    name: Python 3.10 syntax floor
+    # Every other job runs 3.12, where `f'{",\n".join(x)}'` is legal. It is a
+    # SyntaxError on 3.10 and 3.11, which pyproject.toml still promises to
+    # support, so `import unirt` was broken there with nothing to catch it.
+    # Parsing the package under the oldest supported interpreter is enough --
+    # this is about grammar, not behaviour, so it needs no native build.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PYTHON_FLOOR: '3.10'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_FLOOR }}
+      - name: Check the declared floor matches pyproject
+        run: |
+          declared=$(sed -n 's/^requires-python = ">=\(.*\)"/\1/p' bindings/python/pyproject.toml)
+          echo "pyproject requires-python >= $declared; this job runs $PYTHON_FLOOR"
+          test "$declared" = "$PYTHON_FLOOR"
+      - name: Compile every module
+        run: python -m compileall -q bindings/python/unirt
+
   macos:
     name: macOS arm64 (llama_cpp)
     runs-on: macos-latest

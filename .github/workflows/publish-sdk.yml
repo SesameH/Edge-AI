@@ -222,7 +222,10 @@ jobs:
         # Loading the plugin proves the packaging; only decoding proves the
         # binary itself runs on Windows, which cross-compilation cannot.
         run: |
-          & wheel-smoke\Scripts\python -m pip install --quiet huggingface_hub
+          # Every declared dependency, not just huggingface_hub: `import unirt`
+          # reaches tokenizers through modeling.py, so a partial install dies
+          # before decoding starts and the step proves nothing.
+          & wheel-smoke\Scripts\python -m pip install --quiet huggingface_hub tokenizers tqdm
           Invoke-WebRequest -Uri $env:GGUF_URL -OutFile smoke-model.gguf
           & wheel-smoke\Scripts\python bindings/python/smoke_inference_wheel.py smoke-model.gguf
       - uses: actions/upload-artifact@v4

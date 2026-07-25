@@ -296,7 +296,13 @@ class _NativeModel:
                 if value:
                     entries.append(f"  {label}='{value}'")
         name = type(self).__name__
-        return f'{name}()' if not entries else f'{name}(\n{",\n".join(entries)},\n)'
+        if not entries:
+            return f'{name}()'
+        # Joined outside the f-string: a backslash inside an f-string
+        # expression is a syntax error before 3.12, and this package supports
+        # 3.10.
+        body = ',\n'.join(entries)
+        return f'{name}(\n{body},\n)'
 
     def _generate_locked(self, prompt: str, config, callback) -> GenerateOutput:
         library = load_library()
@@ -866,7 +872,11 @@ class UniRTEmbedding:
                 value = self._meta.get(key)
                 if value:
                     details.append(f"  {key}='{value}'")
-        return 'UniRTEmbedding()' if not details else f'UniRTEmbedding(\n{",\n".join(details)},\n)'
+        if not details:
+            return 'UniRTEmbedding()'
+        # Joined outside the f-string, as in UniRTLLM.__repr__ above.
+        body = ',\n'.join(details)
+        return f'UniRTEmbedding(\n{body},\n)'
 
     @staticmethod
     def _validate_texts(texts: str | list[str]) -> tuple[list[str], bool]:
