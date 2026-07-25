@@ -41,4 +41,44 @@ final class InferenceSmokeTests: XCTestCase {
         try await session.reset()
         await session.close()
     }
+
+    /// The tool-calling logic is covered without a model in ToolCallingTests;
+    /// what needs a real backend is the wiring — that the generated schema
+    /// actually reaches the sampler. A 135M model is far too small to pick the
+    /// right tool, but `required` makes that irrelevant: the grammar cannot
+    /// emit anything but one of these branches, so a reply that parses into a
+    /// declared call proves the constraint was applied.
+    func testRequiredToolChoiceConstrainsARealBackend() async throws {
+        guard let modelPath = ProcessInfo.processInfo.environment["UNIRT_TEST_MODEL_PATH"],
+              !modelPath.isEmpty
+        else {
+            throw XCTSkip("UNIRT_TEST_MODEL_PATH not set; skipping inference smoke test")
+        }
+
+        try UniRT.registerStaticPlugin(identity: unirt_plugin_id, open: unirt_plugin_open)
+        try UniRT.start()
+        defer { try? UniRT.stop() }
+
+        let session = try await UniRT.createLlmSession(modelPath: modelPath, nCtx: 512, nGpuLayers: 0)
+        defer { Task { await session.close() } }
+
+        let reply = try await session.chatWithTools(
+            [.user("What is the weather in Taipei?")],
+            tools: [
+                ToolDefinition(
+                    name: "get_weather",
+                    description: "Look up the weather",
+                    parametersJson: #"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}"#
+                )
+            ],
+            toolChoice: .required,
+            options: GenerateOptions(maxTokens: 64)
+        )
+
+        guard case .call(let call) = reply else {
+            return XCTFail("required tool choice must produce a call, got \(reply)")
+        }
+        XCTAssertEqual(call.name, "get_weather")
+        XCTAssertTrue(call.argumentsJson.contains("city"), call.argumentsJson)
+    }
 }

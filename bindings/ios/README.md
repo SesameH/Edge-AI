@@ -121,6 +121,39 @@ let reply = try await session.generate(
     prompt: prompt, options: VlmGenerateOptions(imagePaths: ["/path/to/photo.jpg"]))
 ```
 
+### Tool calling
+
+The declared tools are compiled into a JSON schema the sampler physically
+cannot leave, so a reply always parses and always names a tool you declared —
+the same approach the Python binding and the OpenAI-compatible server take,
+and all three emit an identical schema for identical tools. One call per turn.
+
+```swift
+let tools = [
+    ToolDefinition(
+        name: "get_weather",
+        description: "Look up the weather",
+        parametersJson: #"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}"#
+    )
+]
+var messages: [ChatMessage] = [.user("What's the weather in Taipei?")]
+
+switch try await session.chatWithTools(messages, tools: tools) {
+case .text(let content):
+    print(content)
+case .call(let call):
+    let result = runTool(call.name, call.argumentsJson)          // your code
+    messages += [.toolCall(call), .toolResult(name: call.name, content: result)]
+    print(try await session.chatWithTools(messages, tools: tools))  // the model sees the result
+}
+```
+
+`parametersJson` is JSON Schema text embedded verbatim, so property order
+survives exactly as written; `nil` means the tool takes no arguments.
+`.required` forces some call, `.function(name:)` forces one specific tool, and
+`.none` runs the turn as plain chat. Tools spend the same slot as
+`grammar`/`jsonMode`/`jsonSchema`, so setting both throws.
+
 `LlmSession`/`VlmSession` are Swift `actor`s: the native handle is
 single-threaded by contract, and actor isolation confines every native call
 without extra locking, mirroring the Kotlin binding's dedicated-dispatcher

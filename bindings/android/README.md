@@ -102,6 +102,40 @@ UniRT.createVlmSession(
 UniRT.stop()
 ```
 
+### Tool calling
+
+The declared tools are compiled into a JSON schema the sampler physically
+cannot leave, so a reply always parses and always names a tool you declared —
+the same approach the Python binding and the OpenAI-compatible server take,
+and all three emit an identical schema for identical tools. One call per turn.
+
+```kotlin
+val tools = listOf(
+    ToolDefinition(
+        name = "get_weather",
+        description = "Look up the weather",
+        parametersJson = """{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}""",
+    )
+)
+var messages = listOf(ChatMessage.user("What's the weather in Taipei?"))
+
+when (val reply = session.chatWithTools(messages, tools)) {
+    is ToolReply.Text -> println(reply.content)
+    is ToolReply.Call -> {
+        val result = runTool(reply.call.name, reply.call.argumentsJson)   // your code
+        messages = messages + ChatMessage.toolCall(reply.call) +
+            ChatMessage.toolResult(reply.call.name, result)
+        println(session.chatWithTools(messages, tools))   // the model sees the result
+    }
+}
+```
+
+`parametersJson` is JSON Schema text embedded verbatim, so property order
+survives exactly as written; `null` means the tool takes no arguments.
+`ToolChoice.Required` forces some call, `ToolChoice.Function(name)` forces one
+specific tool, and `ToolChoice.None` runs the turn as plain chat. Tools spend
+the same slot as `grammar`/`jsonMode`/`jsonSchema`, so setting both throws.
+
 Kotlin conventions over ceremony: default arguments instead of builders,
 `object` instead of a singleton class, `Flow` instead of listener
 interfaces.
