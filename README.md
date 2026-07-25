@@ -204,6 +204,12 @@ against that tool's schema. Two limits worth knowing: one call per turn
 together, since they drive the same grammar slot. Streaming a tool turn sends
 the call as one finished delta rather than character by character.
 
+Both text backends constrain decoding, by different routes: `llama_cpp`
+compiles the schema to GBNF, and MLX runs its own pushdown automaton over the
+schema (raw GBNF grammars remain `llama_cpp`-only). Constraining costs about
+9 ms/token on MLX -- a fixed per-step vocabulary scan, so ~13% on a 1.7B model
+and proportionally more on a tiny one.
+
 ## Tests
 
 ```sh

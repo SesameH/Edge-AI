@@ -61,6 +61,14 @@ def mlx_model(sdk):
     m.close()
 
 
+@pytest.fixture(params=['llama_cpp', 'mlx'])
+def constrained_model(request):
+    """Each text backend in turn, for behaviour both must share."""
+    model = request.getfixturevalue('llama_model' if request.param == 'llama_cpp' else 'mlx_model')
+    model.reset()
+    return model
+
+
 CAPITAL_MESSAGES = [{'role': 'user', 'content': 'What is the capital of France? Answer in one sentence.'}]
 
 

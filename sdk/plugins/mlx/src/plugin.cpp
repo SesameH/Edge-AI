@@ -9,13 +9,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <limits>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <mlx/mlx.h>
 
 #include "build_config.h"
 #include "generation_state.h"
+#include "json_constraint.h"
 #include "logging.h"
 #include "model.h"
 #include "sampler.h"
@@ -216,13 +220,27 @@ class MlxLlm : public LlmBackend {
         if (sampler_config && !valid_sampler_config(*sampler_config)) {
             return UNIRT_ERROR_COMMON_INVALID_INPUT;
         }
+        // GBNF is llama.cpp's grammar dialect and has no compiler here; JSON
+        // schema and JSON mode do (json_constraint.h).
         if (sampler_config &&
             ((sampler_config->grammar_path && sampler_config->grammar_path[0]) ||
-             (sampler_config->grammar_string && sampler_config->grammar_string[0]) ||
-             sampler_config->enable_json ||
-             (sampler_config->json_schema && sampler_config->json_schema[0]))) {
-            UNIRT_LOG_ERROR("mlx: grammar/JSON constrained decoding is not implemented");
+             (sampler_config->grammar_string && sampler_config->grammar_string[0]))) {
+            UNIRT_LOG_ERROR("mlx: GBNF grammars are not supported; use json_schema instead");
             return UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED;
+        }
+        std::unique_ptr<JsonConstraint> constraint;
+        if (sampler_config &&
+            (sampler_config->enable_json ||
+             (sampler_config->json_schema && sampler_config->json_schema[0]))) {
+            const std::string schema =
+                sampler_config->json_schema ? sampler_config->json_schema : std::string();
+            std::string error;
+            constraint = JsonConstraint::compile(schema, error);
+            if (!constraint) {
+                UNIRT_LOG_ERROR("mlx: {}", error);
+                return UNIRT_ERROR_COMMON_INVALID_INPUT;
+            }
+            mask_cache_.clear();  // masks belong to one schema, not to the model
         }
 
         std::vector<int32_t> prompt_ids;
@@ -283,13 +301,14 @@ class MlxLlm : public LlmBackend {
         const int64_t t_start = now_us();
         auto          logits  = model_.forward_logits(fresh_ids);
         transcript_.insert(transcript_.end(), fresh_ids.begin(), fresh_ids.end());
-        int32_t       next    = sampler.sample(logits);
+        bool exhausted = constraint && !constrain_logits(logits, *constraint, eos);
+        int32_t       next    = exhausted ? eos : sampler.sample(logits);
         const int64_t t_first = now_us();
 
         int32_t generated = 0;
         while (generated < max_tokens) {
-            if (next == eos) {
-                stop_reason = "eos";
+            if (next == eos || exhausted) {
+                stop_reason = exhausted ? "length" : "eos";
                 if (!stream_state.emit_safe(input->on_token, input->user_data, true)) {
                     stream_state.discard_unemitted();
                     stop_reason = "user";
@@ -305,6 +324,11 @@ class MlxLlm : public LlmBackend {
                 break;
             }
             std::string piece = tokenizer_.decode_piece(next);
+            if (constraint && !constraint->accept(piece)) {
+                // Unreachable unless masking and the automaton disagree.
+                UNIRT_LOG_ERROR("mlx: sampled token {} violates the JSON constraint", next);
+                return UNIRT_ERROR_LLM_GENERATION_FAILED;
+            }
 
             // Commit the sampled token to every layer's KV cache before any
             // exit path.  The returned logits are used only when decoding
@@ -332,7 +356,8 @@ class MlxLlm : public LlmBackend {
                 }
                 break;
             }
-            next   = sampler.sample(logits);
+            exhausted = constraint && !constrain_logits(logits, *constraint, eos);
+            next      = exhausted ? eos : sampler.sample(logits);
         }
         const int64_t t_end = now_us();
 
@@ -393,9 +418,85 @@ class MlxLlm : public LlmBackend {
         return true;
     }
 
+    // Constrained decoding tests every candidate token against the grammar on
+    // every step, so the per-id byte decode is hoisted out of that loop and
+    // done once per model. Tokens are also bucketed by first byte: the schema
+    // usually admits only a handful of next bytes, and a bucket whose first
+    // byte is already refused cannot contain an acceptable token.
+    void build_vocabulary_cache() {
+        if (!token_bytes_.empty()) return;
+        const size_t count = static_cast<size_t>(tokenizer_.vocab_size());
+        token_bytes_.resize(count);
+        first_byte_buckets_.assign(256, {});
+        for (size_t id = 0; id < count; ++id) {
+            const int32_t token = static_cast<int32_t>(id);
+            // Special tokens are control markers, not JSON text; EOS is
+            // handled separately and the rest must never appear mid-value.
+            if (tokenizer_.is_special(token)) continue;
+            token_bytes_[id] = tokenizer_.decode_piece(token);
+            if (token_bytes_[id].empty()) continue;
+            const auto first = static_cast<unsigned char>(token_bytes_[id][0]);
+            first_byte_buckets_[first].push_back(token);
+        }
+    }
+
+    // Sets every token the schema forbids to -inf. Returns false when nothing
+    // at all may follow, which can only happen if the schema admits no
+    // continuation the tokenizer can spell.
+    bool constrain_logits(std::vector<float>& logits, JsonConstraint& constraint, int32_t eos) {
+        build_vocabulary_cache();
+        // Testing 49k tokens against the automaton costs about as much as the
+        // forward pass on a small model, and most steps repeat a state that
+        // was already scored -- every character inside a string leaves the
+        // automaton in the same place. Keyed on the state, the mask is
+        // computed a handful of times per generation instead of per token.
+        const std::string signature = constraint.state_signature();
+        auto              cached    = mask_cache_.find(signature);
+        if (cached == mask_cache_.end()) {
+            std::vector<uint8_t> allowed(logits.size(), 0);
+            bool                 any = false;
+            for (int byte = 0; byte < 256; ++byte) {
+                const auto& bucket = first_byte_buckets_[static_cast<size_t>(byte)];
+                if (bucket.empty()) continue;
+                if (!constraint.allows(std::string(1, static_cast<char>(byte)))) continue;
+                for (int32_t token : bucket) {
+                    if (static_cast<size_t>(token) >= allowed.size()) continue;
+                    if (!constraint.allows(token_bytes_[static_cast<size_t>(token)])) continue;
+                    allowed[static_cast<size_t>(token)] = 1;
+                    any                                 = true;
+                }
+            }
+            // Ending the value is the grammar's decision, not the model's:
+            // EOS stays masked until the JSON is syntactically complete.
+            if (eos >= 0 && static_cast<size_t>(eos) < allowed.size() && constraint.can_stop()) {
+                allowed[static_cast<size_t>(eos)] = 1;
+                any                               = true;
+            }
+            // An empty mask is the "nothing may follow" marker, cached like
+            // any other so a dead end is not rediscovered token by token.
+            if (!any) allowed.clear();
+            if (mask_cache_.size() >= kMaxCachedMasks) mask_cache_.clear();
+            cached = mask_cache_.emplace(signature, std::move(allowed)).first;
+        }
+        const std::vector<uint8_t>& allowed = cached->second;
+        if (allowed.empty()) return false;
+        for (size_t id = 0; id < logits.size(); ++id) {
+            if (id >= allowed.size() || !allowed[id]) {
+                logits[id] = -std::numeric_limits<float>::infinity();
+            }
+        }
+        return true;
+    }
+
     BpeTokenizer tokenizer_;
     LlamaModel   model_;
     int32_t      n_ctx_ = 0;
+    std::vector<std::string>          token_bytes_;
+    std::vector<std::vector<int32_t>> first_byte_buckets_;
+    // Bounded so a long generation over a deep schema cannot grow it without
+    // limit; a schema that busy is also one whose states rarely repeat.
+    static constexpr size_t                                 kMaxCachedMasks = 64;
+    std::unordered_map<std::string, std::vector<uint8_t>>   mask_cache_;
     // Ids of every token currently represented in the KV cache, in order.
     // Lets a resent conversation transcript skip re-evaluating its prefix.
     std::vector<int32_t> transcript_;

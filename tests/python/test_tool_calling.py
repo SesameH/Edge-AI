@@ -161,7 +161,7 @@ class TestOutputInterpretation:
 
 
 class TestConstrainedGeneration:
-    """The synthesized schema has to survive the plugin's grammar compiler."""
+    """The synthesized schema has to survive both backends' compilers."""
 
     def _generate(self, model, plan, user_text: str) -> str:
         messages = apply_tool_prompt([{'role': 'user', 'content': user_text}], plan)
@@ -170,25 +170,25 @@ class TestConstrainedGeneration:
         model.reset()
         return out.text
 
-    def test_required_choice_yields_a_valid_call(self, llama_model):
+    def test_required_choice_yields_a_valid_call(self, constrained_model):
         plan = parse_tool_request({'tools': [WEATHER_TOOL], 'tool_choice': 'required'})
         content, calls = interpret_output(
-            self._generate(llama_model, plan, 'What is the weather in Taipei?'), plan
+            self._generate(constrained_model, plan, 'What is the weather in Taipei?'), plan
         )
         assert content is None, f'expected a tool call, got text: {content!r}'
         assert calls[0]['function']['name'] == 'get_weather'
         assert isinstance(json.loads(calls[0]['function']['arguments'])['location'], str)
 
-    def test_auto_choice_produces_one_of_the_two_shapes(self, llama_model):
+    def test_auto_choice_produces_one_of_the_two_shapes(self, constrained_model):
         plan = parse_tool_request({'tools': [WEATHER_TOOL]})
-        text = self._generate(llama_model, plan, 'Say hello.')
+        text = self._generate(constrained_model, plan, 'Say hello.')
         payload = json.loads(text)
         assert ('content' in payload) ^ ('name' in payload)
 
-    def test_named_choice_pins_the_tool(self, llama_model):
+    def test_named_choice_pins_the_tool(self, constrained_model):
         plan = parse_tool_request({
             'tools': [WEATHER_TOOL, CLOCK_TOOL],
             'tool_choice': {'type': 'function', 'function': {'name': 'get_time'}},
         })
-        _, calls = interpret_output(self._generate(llama_model, plan, 'What time is it?'), plan)
+        _, calls = interpret_output(self._generate(constrained_model, plan, 'What time is it?'), plan)
         assert calls[0]['function']['name'] == 'get_time'
