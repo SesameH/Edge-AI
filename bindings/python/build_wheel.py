@@ -27,12 +27,20 @@ _VERSION_RE = re.compile(r'^\d+\.\d+\.\d+$')
 _VERSION_LINE_RE = re.compile(r'^VERSION = .*$', re.MULTILINE)
 
 
-def _native_names() -> tuple[str, str]:
-    if sys.platform == 'win32':
+def _native_names(platform_tag: str) -> tuple[str, str]:
+    """Library filenames for the wheel's *target*, not the build host.
+
+    Taken from the platform tag rather than ``sys.platform`` so a wheel can be
+    cross-built -- the Windows wheels are produced on macOS with llvm-mingw,
+    where asking the host would look for ``.dylib`` and fail.
+    """
+    if platform_tag.startswith('win'):
         return 'unirt.dll', 'unirt_plugin.dll'
-    if sys.platform == 'darwin':
+    if platform_tag.startswith('macosx'):
         return 'libunirt.dylib', 'libunirt_plugin.dylib'
-    return 'libunirt.so', 'libunirt_plugin.so'
+    if platform_tag.startswith(('manylinux', 'musllinux', 'linux')):
+        return 'libunirt.so', 'libunirt_plugin.so'
+    raise ValueError(f'cannot infer native library names from platform tag {platform_tag!r}')
 
 
 def _ignore_source(_directory: str, names: list[str]) -> set[str]:
@@ -57,8 +65,8 @@ def _stamp_version(version_file: Path, version: str) -> None:
     version_file.write_text(updated, encoding='utf-8')
 
 
-def _verify_wheel(wheel_path: Path, version: str) -> None:
-    main_library, plugin_library = _native_names()
+def _verify_wheel(wheel_path: Path, version: str, platform_tag: str) -> None:
+    main_library, plugin_library = _native_names(platform_tag)
     expected = {
         f'unirt/lib/{main_library}',
         f'unirt/lib/llama_cpp/{plugin_library}',
@@ -86,7 +94,7 @@ def build_wheel(
     output_dir: Path,
 ) -> Path:
     native_lib = native_prefix.resolve() / 'lib'
-    main_library, plugin_library = _native_names()
+    main_library, plugin_library = _native_names(platform_tag)
     required = (
         native_lib / main_library,
         native_lib / 'llama_cpp' / plugin_library,
@@ -137,7 +145,7 @@ def build_wheel(
         destination = output_dir / tagged[0].name
         shutil.copy2(tagged[0], destination)
 
-    _verify_wheel(destination, version)
+    _verify_wheel(destination, version, platform_tag)
     return destination
 
 
