@@ -131,6 +131,22 @@ jobs:
             --platform-tag "${{ matrix.platform_tag }}" \
             --output-dir publish
           auditwheel show publish/*.whl
+          # The platform tag is stamped by hand above, so nothing so far has
+          # checked that the binary earns it. `auditwheel show` reports the tag
+          # the wheel actually qualifies for; a build that picked up a newer
+          # glibc than the image promises would otherwise ship mislabelled and
+          # fail at import on the oldest distro the tag claims to support.
+          earned=$(auditwheel show publish/*.whl | tr '\n' ' ' \
+            | sed -n 's/.*following platform tag: "\([^"]*\)".*/\1/p')
+          test -n "$earned"
+          glibc_of() { echo "${1#manylinux_}" | cut -d_ -f1,2 | tr _ .; }
+          needs=$(glibc_of "$earned")
+          claims=$(glibc_of "${{ matrix.platform_tag }}")
+          echo "wheel needs glibc $needs, tag claims $claims"
+          if [ "$(printf '%s\n%s\n' "$needs" "$claims" | sort -V | head -1)" != "$needs" ]; then
+            echo "::error::wheel needs glibc $needs but is tagged manylinux_${claims/./_}"
+            exit 1
+          fi
           python -m venv wheel-smoke
           wheel-smoke/bin/python -m pip install --no-deps publish/*.whl
           wheel-smoke/bin/python bindings/python/smoke_installed_wheel.py
