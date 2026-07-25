@@ -10,7 +10,12 @@
 namespace unirt::mlx_plugin {
 namespace {
 
-using json = nlohmann::json;
+// Ordered, not the default sorted map: properties must be emitted in the
+// order the schema declares them. Sorted keys would put a tool call's
+// "arguments" before its "name", forcing the model to invent arguments before
+// it has committed to which tool they belong to. llama_cpp's compiler parses
+// with the same type for the same reason.
+using json = nlohmann::ordered_json;
 
 constexpr int32_t kMaxNodes = 4096;
 constexpr int32_t kMaxDepth = 64;
