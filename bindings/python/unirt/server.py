@@ -53,15 +53,31 @@ def _completion_id() -> str:
     return 'chatcmpl-' + uuid.uuid4().hex[:24]
 
 
-def _with_clean_model_state(model, lock: threading.Lock, operation):
-    """Serialize one operation and guarantee clean KV state on both edges."""
+def _with_serialized_model(model, lock: threading.Lock, operation, *, reuse_prefix=True):
+    """Serialize one generation, dropping cached state only when it may be stale.
+
+    Cached KV is what makes multi-turn chat cheap: with n_past=0 the plugin
+    reuses the longest prefix shared with the previous transcript, so a resent
+    conversation only prefills its new suffix. Resetting on the way out threw
+    that away and made every turn re-prefill the whole transcript, which grows
+    with the conversation.
+
+    Nothing about the HTTP contract changes -- clients still send the full
+    transcript every time, and a prompt that does not extend the cached one
+    simply matches a shorter prefix. A failed or abandoned run is the one case
+    where the plugin's transcript may no longer mirror its KV, so that path
+    still resets.
+    """
 
     with lock:
-        model.reset()
         try:
-            return operation()
-        finally:
+            result = operation()
+        except BaseException:
             model.reset()
+            raise
+        if not reuse_prefix:
+            model.reset()
+        return result
 
 
 def _parse_embedding_request(req: dict) -> tuple[list[str] | list[list[int]], str]:
@@ -543,7 +559,12 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._blocking_completion(prompt, gen_kwargs, plan)
 
-            _with_clean_model_state(model, self.server.gen_lock, generate_response)
+            _with_serialized_model(
+                model,
+                self.server.gen_lock,
+                generate_response,
+                reuse_prefix=self.server.reuse_prefix,
+            )
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as exc:  # noqa: BLE001 — HTTP boundary
@@ -721,11 +742,13 @@ class UniRTHTTPServer(ThreadingHTTPServer):
         max_queued_requests: int = 8,
         embedding=None,
         embedding_id: str | None = None,
+        reuse_prefix: bool = True,
     ):
         self.model = model
         self.model_id = model_id
         self.embedding = embedding
         self.embedding_id = embedding_id
+        self.reuse_prefix = reuse_prefix
         self.capabilities = model.capabilities() if isinstance(model, UniRTVLM) else None
         self.gen_lock = threading.Lock()
         # Generation itself is fully serialized by gen_lock (one model, one KV
@@ -744,11 +767,13 @@ def serve(
     max_queued_requests: int = 8,
     embedding=None,
     embedding_id: str | None = None,
+    reuse_prefix: bool = True,
 ) -> None:
     """Serve until interrupted, then stop accepting and join active requests."""
 
     server = UniRTHTTPServer(
-        (host, port), model, model_id, max_queued_requests, embedding, embedding_id
+        (host, port), model, model_id, max_queued_requests, embedding, embedding_id,
+        reuse_prefix,
     )
     previous_handlers: dict[int, object] = {}
 
@@ -800,6 +825,14 @@ def main() -> None:
         type=int,
         default=0,
         help='context window in tokens (0 = the model default)',
+    )
+    ap.add_argument(
+        '--no-prefix-cache',
+        action='store_true',
+        help='clear cached KV state after every request instead of letting the '
+             'next one reuse a shared prefix. Slower for multi-turn chat; the '
+             'escape hatch for the tiny numeric differences that reusing cached '
+             'KV can produce versus a cold prefill',
     )
     ap.add_argument(
         '--max-queued-requests',
@@ -859,6 +892,7 @@ def main() -> None:
             args.max_queued_requests,
             embedding,
             embedding_id,
+            not args.no_prefix_cache,
         )
     finally:
         for handle in (model, embedding):

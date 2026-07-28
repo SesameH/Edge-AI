@@ -17,7 +17,7 @@ from unirt.server import (
     _parse_generation_args,
     _prepare_messages,
     _validate_messages,
-    _with_clean_model_state,
+    _with_serialized_model,
 )
 
 
@@ -50,18 +50,42 @@ class FakeModel:
         }
 
 
-def test_request_state_is_reset_even_after_success():
+def test_successful_request_keeps_cached_state_for_the_next_one():
+    """The cached prefix is the whole point: resetting after a good run would
+    make every turn of a conversation re-prefill the entire transcript."""
     model = FakeModel()
-    result = _with_clean_model_state(model, threading.Lock(), lambda: model.generate('hi'))
+    result = _with_serialized_model(model, threading.Lock(), lambda: model.generate('hi'))
     assert result.text == 'ok'
-    assert model.reset_count == 2
+    assert model.reset_count == 0
 
 
-def test_request_state_is_reset_after_generation_error():
+def test_failed_generation_drops_cached_state():
+    """A run that raised may leave the plugin's transcript out of step with its
+    KV, and the next request would then reuse a prefix that is not really there."""
     model = FakeModel(fail=True)
     with pytest.raises(RuntimeError, match='boom'):
-        _with_clean_model_state(model, threading.Lock(), lambda: model.generate('hi'))
-    assert model.reset_count == 2
+        _with_serialized_model(model, threading.Lock(), lambda: model.generate('hi'))
+    assert model.reset_count == 1
+
+
+def test_abandoned_stream_drops_cached_state():
+    """A client that disconnects mid-stream aborts generation part-written."""
+    model = FakeModel()
+
+    def disconnect():
+        raise BrokenPipeError('client went away')
+
+    with pytest.raises(BrokenPipeError):
+        _with_serialized_model(model, threading.Lock(), disconnect)
+    assert model.reset_count == 1
+
+
+def test_prefix_cache_can_be_turned_off():
+    model = FakeModel()
+    _with_serialized_model(
+        model, threading.Lock(), lambda: model.generate('hi'), reuse_prefix=False
+    )
+    assert model.reset_count == 1
 
 
 @pytest.mark.parametrize(
@@ -166,7 +190,9 @@ def test_server_main_accepts_hf_vlm_and_does_not_request_llm_stats(monkeypatch, 
         server,
         'serve',
         lambda current, model_id, host, port, max_queued_requests=8, embedding=None,
-        embedding_id=None: served.append((current, model_id, host, port)),
+        embedding_id=None, reuse_prefix=True: served.append(
+            (current, model_id, host, port, reuse_prefix)
+        ),
     )
     monkeypatch.setattr(
         sys,
@@ -177,7 +203,7 @@ def test_server_main_accepts_hf_vlm_and_does_not_request_llm_stats(monkeypatch, 
     server.main()
 
     assert loaded == [('acme/vision-GGUF', {'device_map': 'llama_cpp', 'n_ctx': 0})]
-    assert served == [(model, 'vision-GGUF', '127.0.0.1', 9000)]
+    assert served == [(model, 'vision-GGUF', '127.0.0.1', 9000, True)]
     assert model.closed
     assert 'VLM: vision' in capsys.readouterr().out
 
@@ -588,3 +614,121 @@ def test_models_lists_both_when_both_are_loaded():
         worker.join(timeout=5)
         httpd.server_close()
     assert [entry['id'] for entry in body['data']] == ['fake-model', 'fake-embedding']
+
+
+def _chat(port, content: str, timeout: float = 60.0):
+    import http.client
+
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=timeout)
+    try:
+        body = json.dumps({
+            'messages': [{'role': 'user', 'content': content}],
+            'max_tokens': 8,
+            'temperature': 0,
+        }).encode()
+        connection.request(
+            'POST', '/v1/chat/completions', body=body,
+            headers={'Content-Type': 'application/json', 'Content-Length': str(len(body))},
+        )
+        response = connection.getresponse()
+        return response.status, json.loads(response.read())
+    finally:
+        connection.close()
+
+
+def _stats(port):
+    import http.client
+
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+    try:
+        connection.request('GET', '/v1/stats')
+        return json.loads(connection.getresponse().read())
+    finally:
+        connection.close()
+
+
+def _run_server(model, reuse_prefix: bool, body):
+    httpd = server.UniRTHTTPServer(
+        ('127.0.0.1', 0), model, 'real-model', 8, None, None, reuse_prefix
+    )
+    port = httpd.server_address[1]
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    try:
+        return body(port)
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+
+
+@pytest.fixture()
+def served_llm(sdk):
+    """A model of this server's own, not the session-wide one: these tests
+    deliberately leave KV state behind, which the shared fixture must not see."""
+    from conftest import model_path
+    from unirt.auto import AutoModelForCausalLM
+
+    model = AutoModelForCausalLM.from_pretrained(model_path('gguf'), device_map='llama_cpp')
+    yield model
+    model.close()
+
+
+def test_cached_kv_survives_a_request_and_is_reused(served_llm):
+    """End-to-end proof that the server stopped throwing the prefix cache away:
+    kv_cache_bytes is near-empty on a fresh model, and stays populated after a
+    completed request so the next one can match a prefix against it."""
+
+    def body(port):
+        empty = _stats(port)['kv_cache_bytes']
+        status, _ = _chat(port, 'Name three colours.')
+        assert status == 200
+        after_first = _stats(port)['kv_cache_bytes']
+
+        # A second turn that extends the first must still succeed, and leave
+        # cached state behind in turn.
+        status, payload = _chat(port, 'Name three colours. Then name three fruits.')
+        assert status == 200
+        assert payload['choices'][0]['message']['content'] is not None
+        return empty, after_first, _stats(port)['kv_cache_bytes']
+
+    empty, after_first, after_second = _run_server(served_llm, True, body)
+    assert after_first > empty
+    assert after_second > empty
+
+
+def test_no_prefix_cache_clears_kv_after_every_request(served_llm):
+    def body(port):
+        empty = _stats(port)['kv_cache_bytes']
+        status, _ = _chat(port, 'Name three colours.')
+        assert status == 200
+        return empty, _stats(port)['kv_cache_bytes']
+
+    empty, after = _run_server(served_llm, False, body)
+    assert after == empty
+
+
+def test_failed_generation_leaves_no_cached_state(served_llm):
+    """The failure path must still reset: a run that raised may leave the
+    plugin's token transcript out of step with what is actually in KV."""
+    original = served_llm.generate
+    calls = []
+
+    def failing(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError('boom')
+
+    def body(port):
+        empty = _stats(port)['kv_cache_bytes']
+        served_llm.generate = failing
+        try:
+            status, payload = _chat(port, 'this one explodes')
+        finally:
+            served_llm.generate = original
+        assert status == 500
+        assert 'boom' in payload['error']['message']
+        return empty, _stats(port)['kv_cache_bytes']
+
+    empty, after = _run_server(served_llm, True, body)
+    assert calls == [1]
+    assert after == empty

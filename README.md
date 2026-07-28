@@ -210,6 +210,15 @@ well as `float` — the official client requests base64 by default whenever nump
 is installed. `dimensions` is rejected rather than honoured by truncation,
 which is only meaningful for Matryoshka-trained models.
 
+Chat requests reuse cached KV across calls, so a resent transcript only
+prefills its new suffix (measured on SmolLM2-135M: 165 ms → 65 ms by the second
+turn, 232 ms → 71 ms by the fourth, and the gap keeps widening with the
+conversation). The endpoint stays stateless — clients still send the whole
+transcript, and one that does not extend the cached prompt simply matches a
+shorter prefix. Reusing cached KV instead of prefilling from cold can shift
+logits by ~1e-4, which greedy decoding can occasionally turn into a different
+token; `--no-prefix-cache` restores a cold prefill per request.
+
 `response_format` (`json_object` / `json_schema`) and `tools` + `tool_choice`
 are both honoured by constraining decoding with a grammar, so a tool call from
 a 1B model still names a declared tool and carries arguments that validate
