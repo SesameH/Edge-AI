@@ -186,14 +186,13 @@ def test_server_main_accepts_hf_vlm_and_does_not_request_llm_stats(monkeypatch, 
         'from_pretrained',
         lambda source, **kwargs: loaded.append((source, kwargs)) or model,
     )
-    monkeypatch.setattr(
-        server,
-        'serve',
-        lambda current, model_id, host, port, max_queued_requests=8, embedding=None,
-        embedding_id=None, reuse_prefix=True: served.append(
-            (current, model_id, host, port, reuse_prefix)
-        ),
-    )
+    # *rest, **kwargs: this test is about which model main() loads and hands
+    # over, not about serve()'s full signature, which keeps growing as
+    # endpoints are added.
+    def fake_serve(current, model_id, host, port, *rest, **kwargs):
+        served.append((current, model_id, host, port))
+
+    monkeypatch.setattr(server, 'serve', fake_serve)
     monkeypatch.setattr(
         sys,
         'argv',
@@ -203,7 +202,7 @@ def test_server_main_accepts_hf_vlm_and_does_not_request_llm_stats(monkeypatch, 
     server.main()
 
     assert loaded == [('acme/vision-GGUF', {'device_map': 'llama_cpp', 'n_ctx': 0})]
-    assert served == [(model, 'vision-GGUF', '127.0.0.1', 9000, True)]
+    assert served == [(model, 'vision-GGUF', '127.0.0.1', 9000)]
     assert model.closed
     assert 'VLM: vision' in capsys.readouterr().out
 
@@ -732,3 +731,169 @@ def test_failed_generation_leaves_no_cached_state(served_llm):
     empty, after = _run_server(served_llm, True, body)
     assert calls == [1]
     assert after == empty
+
+
+class FakeReranker:
+    """Stands in for a UniRTEmbedding opened on a cross-encoder: rerank() only."""
+
+    def __init__(self, scores=None):
+        self.scores = scores
+        self.calls = []
+
+    def rerank(self, query, documents):
+        self.calls.append((query, list(documents)))
+        if self.scores is not None:
+            return list(self.scores)
+        # Deterministic and order-independent: longer documents score higher.
+        return [float(len(text)) for text in documents]
+
+    def runtime_stats(self):
+        return {'device_name': 'Fake NPU'}
+
+
+def _rerank_server(reranker):
+    return server.UniRTHTTPServer(
+        ('127.0.0.1', 0), None, None, 8, None, None, True, reranker, 'fake-reranker'
+    )
+
+
+def test_rerank_sorts_by_score_and_keeps_original_indices():
+    reranker = FakeReranker(scores=[-2.0, 5.0, 1.0])
+    status, body = _post_to(
+        _rerank_server(reranker), '/v1/rerank',
+        {'query': 'q', 'documents': ['first', 'second', 'third']},
+    )
+    assert status == 200
+    assert body['object'] == 'list'
+    assert body['model'] == 'fake-reranker'
+    # Sorted best first, but index still points into the request's own array.
+    assert [entry['index'] for entry in body['results']] == [1, 2, 0]
+    scores = [entry['relevance_score'] for entry in body['results']]
+    assert scores == sorted(scores, reverse=True)
+    assert reranker.calls == [('q', ['first', 'second', 'third'])]
+
+
+def test_rerank_maps_logits_into_zero_to_one():
+    """relevance_score means 0..1 to every client that speaks this API; the
+    model emits unbounded cross-encoder logits."""
+    status, body = _post_to(
+        _rerank_server(FakeReranker(scores=[0.0, 8.6, -11.0, -800.0])), '/v1/rerank',
+        {'query': 'q', 'documents': ['a', 'b', 'c', 'd']},
+    )
+    assert status == 200
+    by_index = {entry['index']: entry['relevance_score'] for entry in body['results']}
+    assert by_index[0] == pytest.approx(0.5)
+    assert by_index[1] == pytest.approx(1 / (1 + 2.718281828 ** -8.6), rel=1e-6)
+    assert 0.0 < by_index[2] < 0.001
+    # A very negative logit must not overflow on the way to a probability.
+    assert by_index[3] == pytest.approx(0.0, abs=1e-12)
+    assert all(0.0 <= value <= 1.0 for value in by_index.values())
+
+
+def test_rerank_top_n_truncates_after_sorting():
+    status, body = _post_to(
+        _rerank_server(FakeReranker(scores=[1.0, 9.0, 5.0])), '/v1/rerank',
+        {'query': 'q', 'documents': ['a', 'b', 'c'], 'top_n': 2},
+    )
+    assert status == 200
+    assert [entry['index'] for entry in body['results']] == [1, 2]
+
+
+def test_rerank_returns_documents_only_when_asked():
+    payload = {'query': 'q', 'documents': ['alpha', 'beta']}
+    status, without = _post_to(_rerank_server(FakeReranker()), '/v1/rerank', payload)
+    assert status == 200
+    assert all('document' not in entry for entry in without['results'])
+
+    status, with_documents = _post_to(
+        _rerank_server(FakeReranker()), '/v1/rerank', {**payload, 'return_documents': True},
+    )
+    assert status == 200
+    # The text must follow its own result, not the request order.
+    for entry in with_documents['results']:
+        assert entry['document']['text'] == payload['documents'][entry['index']]
+
+
+def test_rerank_accepts_cohere_style_document_objects():
+    reranker = FakeReranker()
+    status, _ = _post_to(
+        _rerank_server(reranker), '/v1/rerank',
+        {'query': 'q', 'documents': [{'text': 'alpha'}, {'text': 'beta'}]},
+    )
+    assert status == 200
+    assert reranker.calls == [('q', ['alpha', 'beta'])]
+
+
+@pytest.mark.parametrize('payload', [
+    {'documents': ['a']},
+    {'query': '', 'documents': ['a']},
+    {'query': 'q'},
+    {'query': 'q', 'documents': []},
+    {'query': 'q', 'documents': [1]},
+    {'query': 'q', 'documents': [{'text': ''}]},
+    {'query': 'q', 'documents': ['a'], 'top_n': 0},
+    {'query': 'q', 'documents': ['a'], 'top_n': True},
+    {'query': 'q', 'documents': ['a'], 'return_documents': 'yes'},
+])
+def test_rerank_rejects_malformed_requests(payload):
+    status, _ = _post_to(_rerank_server(FakeReranker()), '/v1/rerank', payload)
+    assert status == 400
+
+
+def test_rerank_without_a_reranker_is_a_clear_404():
+    status, body = _post_to(
+        _embedding_server(FakeEmbedding()), '/v1/rerank', {'query': 'q', 'documents': ['a']},
+    )
+    assert status == 404
+    assert '--rerank-model' in body['error']['message']
+
+
+def test_rerank_reports_a_model_failure_as_a_server_error():
+    class Broken(FakeReranker):
+        def rerank(self, query, documents):
+            raise RuntimeError('no classifier head')
+
+    status, body = _post_to(
+        _rerank_server(Broken()), '/v1/rerank', {'query': 'q', 'documents': ['a']},
+    )
+    assert status == 500
+    assert 'no classifier head' in body['error']['message']
+
+
+def _real_reranker():
+    from conftest import REPO_ROOT
+    from unirt import AutoModelForEmbedding
+
+    bundle = os.path.join(REPO_ROOT, 'models', 'bge-reranker-v2-m3-GGUF')
+    if not os.path.isdir(bundle) or not any(
+        name.endswith('.gguf') for name in os.listdir(bundle)
+    ):
+        pytest.skip('GGUF reranker model not downloaded (see README)')
+    return AutoModelForEmbedding.from_pretrained(bundle)
+
+
+def test_rerank_ranks_a_real_corpus(sdk):
+    """The public loader must open a rerank-only GGUF (no tokenizer.json), and
+    the endpoint must put the relevant document first."""
+    model = _real_reranker()
+    assert model._tokenizer is None
+    try:
+        status, body = _post_to(
+            _rerank_server(model), '/v1/rerank',
+            {
+                'query': 'What is the capital of France?',
+                'documents': [
+                    'Kangaroos are marsupials native to Australia.',
+                    'Paris is the capital and largest city of France.',
+                    'The Loire is the longest river in France.',
+                ],
+                'return_documents': True,
+            },
+        )
+    finally:
+        model.close()
+    assert status == 200
+    assert body['results'][0]['index'] == 1
+    assert 'Paris' in body['results'][0]['document']['text']
+    assert body['results'][0]['relevance_score'] > body['results'][-1]['relevance_score']
+    assert all(0.0 <= entry['relevance_score'] <= 1.0 for entry in body['results'])

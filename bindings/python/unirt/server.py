@@ -5,15 +5,17 @@
 
     python3 -m unirt.server --model models/SmolLM2-135M-Instruct --backend mlx --port 8080
 
-Either model may be omitted, so this also serves as an embeddings-only sidecar:
+Any of the models may be omitted, so this also serves as a retrieval sidecar:
 
-    python3 -m unirt.server --embedding-model models/bge-small-en-v1.5
+    python3 -m unirt.server --embedding-model models/all-MiniLM-L6-v2-GGUF \
+        --rerank-model models/bge-reranker-v2-m3-GGUF
 
 Endpoints:
     GET  /v1/models
     GET  /v1/stats              (runtime_stats(): memory/device usage; not OpenAI-standard)
     POST /v1/chat/completions   (supports "stream": true via SSE)
     POST /v1/embeddings         (requires --embedding-model)
+    POST /v1/rerank             (requires --rerank-model; the Cohere/Jina shape)
 """
 
 from __future__ import annotations
@@ -47,6 +49,9 @@ _MAX_MEDIA_BYTES = 12 * 1024 * 1024
 # One /v1/embeddings call becomes one native batch, so the whole batch is
 # resident at once. This bounds it; clients chunk larger corpora anyway.
 _MAX_EMBEDDING_INPUTS = 2048
+# Reranking is a cross-encoder pass per document, so a batch costs far more
+# than the same number of embeddings.
+_MAX_RERANK_DOCUMENTS = 512
 
 
 def _completion_id() -> str:
@@ -133,6 +138,57 @@ def _parse_embedding_request(req: dict) -> tuple[list[str] | list[list[int]], st
         raise ValueError('dimensions must be a positive integer')
 
     return inputs, encoding_format
+
+
+def _parse_rerank_request(req: dict) -> tuple[str, list[str], int | None, bool]:
+    """Validate a /v1/rerank body (the Cohere/Jina shape llama.cpp also serves)."""
+
+    query = req.get('query')
+    if not isinstance(query, str) or not query or '\x00' in query:
+        raise ValueError('query must be a non-empty NUL-free string')
+
+    raw = req.get('documents')
+    if not isinstance(raw, list) or not raw:
+        raise ValueError('documents must be a non-empty array')
+    if len(raw) > _MAX_RERANK_DOCUMENTS:
+        raise ValueError(f'documents holds more than {_MAX_RERANK_DOCUMENTS} entries')
+    documents: list[str] = []
+    for item in raw:
+        # Cohere's API accepts objects; its own clients send them.
+        text = item.get('text') if isinstance(item, dict) else item
+        if not isinstance(text, str) or not text or '\x00' in text:
+            raise ValueError(
+                'documents must hold non-empty NUL-free strings, or objects with a '
+                "non-empty 'text' string"
+            )
+        documents.append(text)
+
+    top_n = req.get('top_n')
+    if top_n is not None and (
+        not isinstance(top_n, int) or isinstance(top_n, bool) or top_n <= 0
+    ):
+        raise ValueError('top_n must be a positive integer')
+
+    return_documents = req.get('return_documents', False)
+    if not isinstance(return_documents, bool):
+        raise ValueError('return_documents must be a boolean')
+
+    return query, documents, top_n, return_documents
+
+
+def _relevance(score: float) -> float:
+    """Map a cross-encoder logit to (0, 1).
+
+    `relevance_score` means a 0..1 relevance to every client that speaks this
+    API, and a raw logit of -11 does not read as one. The sigmoid is what the
+    BGE reranker's own model card prescribes, and being monotonic it leaves the
+    ranking untouched. Raw logits stay available through UniRTEmbedding.rerank().
+    """
+
+    if score >= 0:
+        return 1.0 / (1.0 + math.exp(-score))
+    exponential = math.exp(score)       # exp(-score) overflows for very negative scores
+    return exponential / (1.0 + exponential)
 
 
 def _pad_token_rows(
@@ -478,14 +534,18 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/v1/models':
             listed = [
                 {'id': name, 'object': 'model', 'owned_by': 'unirt'}
-                for name in (model_id, self.server.embedding_id)
+                for name in (model_id, self.server.embedding_id, self.server.reranker_id)
                 if name is not None
             ]
             self._json(200, {'object': 'list', 'data': listed})
         elif self.path == '/v1/stats':
             # Not an OpenAI-standard endpoint: exposes runtime_stats() for
             # UIs/dashboards that want live device/memory info.
-            served = self.server.model if self.server.model is not None else self.server.embedding
+            served = next(
+                handle
+                for handle in (self.server.model, self.server.embedding, self.server.reranker)
+                if handle is not None
+            )
             self._json(200, served.runtime_stats())
         elif self.path in ('/', '/health'):
             self._json(200, {'status': 'ok', 'model': model_id})
@@ -496,6 +556,9 @@ class Handler(BaseHTTPRequestHandler):
         self._response_started = False
         if self.path == '/v1/embeddings':
             self._handle_embeddings()
+            return
+        if self.path == '/v1/rerank':
+            self._handle_rerank()
             return
         if self.path != '/v1/chat/completions':
             self._error(404, f'unknown path {self.path}')
@@ -642,6 +705,55 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.server.request_slots.release()
 
+    def _handle_rerank(self) -> None:
+        model = self.server.reranker
+        if model is None:
+            self._error(404, 'this server was started without a reranker (--rerank-model)')
+            return
+        req = self._read_json_body()
+        if req is None:
+            return
+        try:
+            query, documents, top_n, return_documents = _parse_rerank_request(req)
+        except ValueError as exc:
+            self._error(400, str(exc))
+            return
+
+        if not self.server.request_slots.acquire(blocking=False):
+            self._busy()
+            return
+        try:
+            scores = model.rerank(query, documents)
+            results = [
+                {'index': index, 'relevance_score': _relevance(score)}
+                for index, score in enumerate(scores)
+            ]
+            results.sort(key=lambda entry: entry['relevance_score'], reverse=True)
+            if top_n is not None:
+                results = results[:top_n]
+            if return_documents:
+                for entry in results:
+                    entry['document'] = {'text': documents[entry['index']]}
+            # No usage block: rerank tokenizes inside the plugin, which reports
+            # no token counts back, and inventing one would be worse than
+            # omitting it.
+            self._json(200, {
+                'object': 'list',
+                'model': self.server.reranker_id,
+                'results': results,
+            })
+        except ValueError as exc:
+            self._error(400, str(exc))
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        except Exception as exc:  # noqa: BLE001 — HTTP boundary
+            if not self._response_started:
+                self._error(500, f'rerank failed: {exc}')
+            else:
+                self.close_connection = True
+        finally:
+            self.server.request_slots.release()
+
     # ---- completion modes ----
 
     def _blocking_completion(self, prompt: str, gen_kwargs: dict, plan=None) -> None:
@@ -743,11 +855,15 @@ class UniRTHTTPServer(ThreadingHTTPServer):
         embedding=None,
         embedding_id: str | None = None,
         reuse_prefix: bool = True,
+        reranker=None,
+        reranker_id: str | None = None,
     ):
         self.model = model
         self.model_id = model_id
         self.embedding = embedding
         self.embedding_id = embedding_id
+        self.reranker = reranker
+        self.reranker_id = reranker_id
         self.reuse_prefix = reuse_prefix
         self.capabilities = model.capabilities() if isinstance(model, UniRTVLM) else None
         self.gen_lock = threading.Lock()
@@ -768,12 +884,14 @@ def serve(
     embedding=None,
     embedding_id: str | None = None,
     reuse_prefix: bool = True,
+    reranker=None,
+    reranker_id: str | None = None,
 ) -> None:
     """Serve until interrupted, then stop accepting and join active requests."""
 
     server = UniRTHTTPServer(
         (host, port), model, model_id, max_queued_requests, embedding, embedding_id,
-        reuse_prefix,
+        reuse_prefix, reranker, reranker_id,
     )
     previous_handlers: dict[int, object] = {}
 
@@ -818,6 +936,17 @@ def main() -> None:
         default='auto',
         help="device for the embedding model: auto, cpu, gpu, npu (default: auto)",
     )
+    ap.add_argument(
+        '--rerank-model',
+        help='cross-encoder to serve at /v1/rerank (local path or Hugging Face '
+             'repository id). A reranker is a different model from an embedding '
+             'encoder, so this is a separate flag',
+    )
+    ap.add_argument(
+        '--rerank-device',
+        default='auto',
+        help='device for the reranker: auto, cpu, gpu, npu (default: auto)',
+    )
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=8080)
     ap.add_argument(
@@ -846,8 +975,8 @@ def main() -> None:
         ap.error('--n-ctx must be >= 0')
     if args.max_queued_requests < 1:
         ap.error('--max-queued-requests must be >= 1')
-    if not args.model and not args.embedding_model:
-        ap.error('at least one of --model or --embedding-model is required')
+    if not args.model and not args.embedding_model and not args.rerank_model:
+        ap.error('at least one of --model, --embedding-model or --rerank-model is required')
 
     def _source_and_id(path: str) -> tuple[str, str]:
         source = os.path.abspath(path) if os.path.exists(path) else path
@@ -857,6 +986,8 @@ def main() -> None:
     model_id = None
     embedding = None
     embedding_id = None
+    reranker = None
+    reranker_id = None
     served: list[str] = []
     try:
         if args.model:
@@ -883,6 +1014,15 @@ def main() -> None:
             stats = embedding.runtime_stats()
             served.append(f"embeddings on {stats.get('device_name') or '?'}")
 
+        if args.rerank_model:
+            rerank_source, reranker_id = _source_and_id(args.rerank_model)
+            print(f'loading {rerank_source} for reranking ...')
+            reranker = AutoModelForEmbedding.from_pretrained(
+                rerank_source, device_map=args.rerank_device
+            )
+            stats = reranker.runtime_stats()
+            served.append(f"rerank on {stats.get('device_name') or '?'}")
+
         print(f"ready on http://{args.host}:{args.port}/v1  ({'; '.join(served)})")
         serve(
             model,
@@ -893,9 +1033,11 @@ def main() -> None:
             embedding,
             embedding_id,
             not args.no_prefix_cache,
+            reranker,
+            reranker_id,
         )
     finally:
-        for handle in (model, embedding):
+        for handle in (model, embedding, reranker):
             if handle is not None:
                 handle.close()
 

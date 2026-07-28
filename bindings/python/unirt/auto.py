@@ -658,7 +658,7 @@ def _resolve_embedding_sources(
     tokenizer_path: str | None,
     hf_token: str | None,
     progress: ProgressCallback | bool | None,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str | None, str, str]:
     if (
         not isinstance(model_name_or_path, str)
         or not model_name_or_path
@@ -680,7 +680,12 @@ def _resolve_embedding_sources(
         if resolved_tokenizer is None and os.path.basename(bundle_dir).casefold() == 'onnx':
             resolved_tokenizer = _find_tokenizer(os.path.dirname(bundle_dir))
         if not resolved_tokenizer or not os.path.isfile(resolved_tokenizer):
-            raise FileNotFoundError('embedding bundle must contain tokenizer.json')
+            # A GGUF carries its own vocab, which is all rerank() needs; encode()
+            # still refuses later with a clear message. An ONNX bundle has no
+            # such fallback, so a missing tokenizer there stays an error.
+            if not model_path.casefold().endswith('.gguf'):
+                raise FileNotFoundError('embedding bundle must contain tokenizer.json')
+            return model_path, None, model_name_or_path, bundle_dir
         return model_path, os.path.abspath(resolved_tokenizer), model_name_or_path, bundle_dir
 
     printer = _progress.resolve(progress)
@@ -702,10 +707,12 @@ def _resolve_embedding_sources(
     return paths.model_path, resolved_tokenizer, paths.model_name, paths.model_dir
 
 
-def _embedding_max_length(bundle_dir: str, tokenizer_path: str, requested: int | None) -> int:
+def _embedding_max_length(
+    bundle_dir: str, tokenizer_path: str | None, requested: int | None
+) -> int:
     if requested is not None:
         return _checked_int('max_length', requested, 1)
-    directories = [os.path.dirname(tokenizer_path), bundle_dir]
+    directories = [os.path.dirname(tokenizer_path) if tokenizer_path else bundle_dir, bundle_dir]
     values: list[int] = []
     for directory in dict.fromkeys(directories):
         sentence_config = _read_json_object(os.path.join(directory, 'sentence_bert_config.json'))

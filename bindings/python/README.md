@@ -104,8 +104,9 @@ Then point any OpenAI client (or plain curl) at
 `http://localhost:8080/v1/chat/completions` — streaming SSE included, and
 GGUF VLMs accept image content parts when loaded with an mmproj.
 
-`--embedding-model <encoder>` adds `/v1/embeddings`, and may be given without
-`--model` to run an embeddings-only sidecar.
+`--embedding-model <encoder>` adds `/v1/embeddings` and `--rerank-model
+<cross-encoder>` adds `/v1/rerank`; either may be given without `--model`, so a
+retrieval sidecar needs no chat model at all.
 
 The native library is discovered automatically from `<repo>/sdk/pkg-unirt/lib`
 (dev layout) or the packaged wheel; set `UNIRT_LIB_PATH` / `UNIRT_PLUGIN_PATH`

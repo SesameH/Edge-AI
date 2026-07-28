@@ -210,6 +210,33 @@ well as `float` — the official client requests base64 by default whenever nump
 is installed. `dimensions` is rejected rather than honoured by truncation,
 which is only meaningful for Matryoshka-trained models.
 
+`--rerank-model` adds `POST /v1/rerank` (the Cohere/Jina shape, which llama.cpp
+also serves): `query` plus `documents` — strings or `{"text": ...}` objects —
+and optional `top_n` / `return_documents`. Results come back sorted, each
+carrying the index it had in the request. A reranker is a cross-encoder, a
+different model from an embedding encoder, hence the separate flag; together
+they make a retrieval sidecar with no chat model loaded at all:
+
+```sh
+PYTHONPATH=$PWD/bindings/python python3 -m unirt.server \
+    --embedding-model models/all-MiniLM-L6-v2-GGUF \
+    --rerank-model models/bge-reranker-v2-m3-GGUF --port 8080
+```
+
+Retrieving "What is the capital of France?" over a five-document corpus, then
+reranking the top three, shows why both stages exist — cosine similarity nearly
+ties the two wrong answers, the cross-encoder does not:
+
+| document | embedding cosine | rerank |
+|---|---|---|
+| Paris is the capital and largest city of France. | 0.772 | 0.9996 |
+| The Eiffel Tower is a landmark in Paris. | 0.408 | 0.3788 |
+| Berlin is the capital of Germany. | 0.401 | 0.0047 |
+
+`relevance_score` is the model's logit through a sigmoid, as the BGE reranker's
+model card prescribes — the ranking is identical either way, and
+`UniRTEmbedding.rerank()` still returns raw logits.
+
 Chat requests reuse cached KV across calls, so a resent transcript only
 prefills its new suffix (measured on SmolLM2-135M: 165 ms → 65 ms by the second
 turn, 232 ms → 71 ms by the fourth, and the gap keeps widening with the
