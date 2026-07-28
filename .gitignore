@@ -31,6 +31,17 @@ examples/android/UniRTChatExample/app/src/main/assets/*.gguf
 # Test models (downloaded per README; hundreds of MB)
 models/
 
+# Release scratch: per-release wheels and assets, and the staging dir the
+# publish steps write into. The scripts that produce them live in tools/release.
+.release-work-*/
+publish/
+
+# Windows verification kit payload — re-fetched by
+# tools/release/windows-verify/fetch-deps.sh, never committed (~110 MB)
+tools/release/windows-verify/installers/
+tools/release/windows-verify/deps/
+tools/release/windows-verify/stage/
+
 # Python
 __pycache__/
 *.pyc
