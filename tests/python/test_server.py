@@ -165,9 +165,8 @@ def test_server_main_accepts_hf_vlm_and_does_not_request_llm_stats(monkeypatch, 
     monkeypatch.setattr(
         server,
         'serve',
-        lambda current, model_id, host, port, max_queued_requests=8: served.append(
-            (current, model_id, host, port)
-        ),
+        lambda current, model_id, host, port, max_queued_requests=8, embedding=None,
+        embedding_id=None: served.append((current, model_id, host, port)),
     )
     monkeypatch.setattr(
         sys,
@@ -414,3 +413,178 @@ def test_streaming_tool_call_arrives_as_one_finished_delta():
         httpd.shutdown()
         worker.join(timeout=5)
         httpd.server_close()
+
+
+class FakeEmbedding:
+    """Stands in for UniRTEmbedding: the server reaches for the same three
+    members (_tokenize, _pad_id/_padding_side, encode_tokens)."""
+
+    def __init__(self, dimension: int = 4):
+        self.dimension = dimension
+        self._pad_id = 0
+        self._padding_side = 'right'
+        self.seen: list[list[list[int]]] = []
+
+    def _tokenize(self, texts):
+        rows = [[1] * (len(text.split()) or 1) for text in texts]
+        width = max(len(row) for row in rows)
+        ids = [row + [self._pad_id] * (width - len(row)) for row in rows]
+        masks = [[1] * len(row) + [0] * (width - len(row)) for row in rows]
+        return ids, masks, [[0] * width for _ in rows]
+
+    def encode_tokens(self, input_ids, *, attention_mask=None, token_type_ids=None):
+        self.seen.append(input_ids)
+        return [
+            [float(index) + offset / 10 for offset in range(self.dimension)]
+            for index in range(len(input_ids))
+        ]
+
+    def runtime_stats(self):
+        return {'device_name': 'Fake NPU'}
+
+
+def _embedding_server(embedding=None, model=None):
+    return server.UniRTHTTPServer(
+        ('127.0.0.1', 0),
+        model,
+        'fake-model' if model is not None else None,
+        8,
+        embedding,
+        'fake-embedding' if embedding is not None else None,
+    )
+
+
+def _post_to(httpd, path, payload):
+    import http.client
+
+    port = httpd.server_address[1]
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            body = json.dumps(payload).encode()
+            connection.request(
+                'POST', path, body=body,
+                headers={'Content-Type': 'application/json', 'Content-Length': str(len(body))},
+            )
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+
+
+def test_embeddings_returns_the_openai_shape():
+    embedding = FakeEmbedding()
+    status, body = _post_to(
+        _embedding_server(embedding), '/v1/embeddings',
+        {'model': 'fake-embedding', 'input': ['hello there', 'bye']},
+    )
+    assert status == 200
+    assert body['object'] == 'list'
+    assert body['model'] == 'fake-embedding'
+    assert [entry['index'] for entry in body['data']] == [0, 1]
+    assert all(entry['object'] == 'embedding' for entry in body['data'])
+    assert body['data'][0]['embedding'] == [0.0, 0.1, 0.2, 0.3]
+    # Padding must not be billed: 'hello there' is 2 tokens, 'bye' is 1.
+    assert body['usage'] == {'prompt_tokens': 3, 'total_tokens': 3}
+
+
+def test_embeddings_accepts_a_bare_string():
+    status, body = _post_to(
+        _embedding_server(FakeEmbedding()), '/v1/embeddings', {'input': 'one input'},
+    )
+    assert status == 200
+    assert len(body['data']) == 1
+
+
+def test_embeddings_base64_encoding_is_little_endian_float32():
+    """The official OpenAI Python client asks for base64 whenever numpy is
+    installed, so a float-only server silently breaks its default path."""
+    import struct
+
+    status, body = _post_to(
+        _embedding_server(FakeEmbedding()), '/v1/embeddings',
+        {'input': 'x', 'encoding_format': 'base64'},
+    )
+    assert status == 200
+    packed = body['data'][0]['embedding']
+    assert isinstance(packed, str)
+    raw = base64.b64decode(packed)
+    assert list(struct.unpack('<4f', raw)) == pytest.approx([0.0, 0.1, 0.2, 0.3])
+
+
+def test_embeddings_accepts_pretokenized_input_and_pads_it():
+    embedding = FakeEmbedding()
+    status, body = _post_to(
+        _embedding_server(embedding), '/v1/embeddings', {'input': [[5, 6, 7], [8]]},
+    )
+    assert status == 200
+    assert len(body['data']) == 2
+    # Ragged rows are padded into one rectangle for the native batch ABI.
+    assert embedding.seen[-1] == [[5, 6, 7], [8, 0, 0]]
+    assert body['usage']['prompt_tokens'] == 4
+
+
+def test_embeddings_rejects_a_dimension_the_model_cannot_emit():
+    status, body = _post_to(
+        _embedding_server(FakeEmbedding()), '/v1/embeddings',
+        {'input': 'x', 'dimensions': 512},
+    )
+    assert status == 400
+    assert 'truncation' in body['error']['message']
+
+
+@pytest.mark.parametrize('payload', [
+    {},
+    {'input': ''},
+    {'input': []},
+    {'input': [1, 'two']},
+    {'input': 'x', 'encoding_format': 'binary'},
+    {'input': 'x', 'dimensions': 0},
+])
+def test_embeddings_rejects_malformed_requests(payload):
+    status, _ = _post_to(_embedding_server(FakeEmbedding()), '/v1/embeddings', payload)
+    assert status == 400
+
+
+def test_embeddings_without_an_embedding_model_is_a_clear_404():
+    status, body = _post_to(
+        _embedding_server(model=FakeModel()), '/v1/embeddings', {'input': 'x'},
+    )
+    assert status == 404
+    assert '--embedding-model' in body['error']['message']
+
+
+def test_chat_without_a_chat_model_is_a_clear_404():
+    status, body = _post_to(
+        _embedding_server(FakeEmbedding()), '/v1/chat/completions',
+        {'messages': [{'role': 'user', 'content': 'hi'}]},
+    )
+    assert status == 404
+    assert '--model' in body['error']['message']
+
+
+def test_models_lists_both_when_both_are_loaded():
+    import http.client
+
+    httpd = _embedding_server(FakeEmbedding(), FakeModel())
+    port = httpd.server_address[1]
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            connection.request('GET', '/v1/models')
+            body = json.loads(connection.getresponse().read())
+        finally:
+            connection.close()
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+    assert [entry['id'] for entry in body['data']] == ['fake-model', 'fake-embedding']

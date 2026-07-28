@@ -192,9 +192,23 @@ PYTHONPATH=$PWD/bindings/python python3 -m unirt.server \
     --model models/SmolLM2-135M-Instruct --backend mlx --port 8080
 ```
 
-Serves `/v1/chat/completions` (blocking + SSE streaming) and `/v1/models`;
-works with the official `openai` Python client and anything else that speaks
-the OpenAI API (`base_url='http://127.0.0.1:8080/v1'`, any api_key).
+Serves `/v1/chat/completions` (blocking + SSE streaming), `/v1/embeddings` and
+`/v1/models`; works with the official `openai` Python client and anything else
+that speaks the OpenAI API (`base_url='http://127.0.0.1:8080/v1'`, any api_key).
+
+`--embedding-model` loads a text encoder for `/v1/embeddings`, alongside the
+chat model or on its own:
+
+```sh
+PYTHONPATH=$PWD/bindings/python python3 -m unirt.server \
+    --embedding-model models/all-MiniLM-L6-v2-GGUF --port 8080
+```
+
+`input` takes all four OpenAI shapes (a string, an array of strings, a token
+array, an array of token arrays) and `encoding_format` supports `base64` as
+well as `float` — the official client requests base64 by default whenever numpy
+is installed. `dimensions` is rejected rather than honoured by truncation,
+which is only meaningful for Matryoshka-trained models.
 
 `response_format` (`json_object` / `json_schema`) and `tools` + `tool_choice`
 are both honoured by constraining decoding with a grammar, so a tool call from
