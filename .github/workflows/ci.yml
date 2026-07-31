@@ -84,6 +84,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e bindings/python pytest
+      - name: Plugin load diagnostics
+        # The loader reports the OS error, but it does so during init(), whose
+        # captured log pytest attaches to no particular test -- so a plugin that
+        # fails to load shows up only as 26 downstream errors. Print the scan
+        # result, and the DLL's dependency list, before the suite runs.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse sdk/pkg-unirt/lib | Select-Object FullName, Length
+          python -c "import logging, unirt._ffi._api as a; logging.basicConfig(level=logging.DEBUG); a.set_log_level('trace'); a.init(); print('runtimes:', a.get_runtime_list())"
+          $plugin = "sdk/pkg-unirt/lib/llama_cpp/unirt_plugin.dll"
+          $dumpbin = Get-Command dumpbin -ErrorAction SilentlyContinue
+          if ($dumpbin) { & dumpbin /DEPENDENTS $plugin } else { Write-Host 'dumpbin unavailable' }
       - name: Run tests
         run: python -m pytest tests/python -q
 
