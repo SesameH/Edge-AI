@@ -6,6 +6,9 @@ on:
     paths-ignore: ['**.md']
   pull_request:
     paths-ignore: ['**.md']
+  # Manual trigger: re-running a docs-only or otherwise skipped commit, and
+  # checking the runners are actually available, should not need a fake push.
+  workflow_dispatch:
 
 # A newer push supersedes any run still going for the same branch.
 concurrency:
