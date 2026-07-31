@@ -347,17 +347,21 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e bindings/python pytest
       - name: Plugin load diagnostics
-        # The loader does report the LoadLibraryExW error, but during init(),
-        # whose captured log pytest attaches to no particular test -- a plugin
-        # that fails to load then surfaces only as dozens of downstream errors
-        # with no cause anywhere in the run output.
+        # LoadLibraryExW returns 126 (ERROR_MOD_NOT_FOUND) for the plugin: one
+        # of its dependencies, possibly a nested one, is unresolvable under the
+        # loader's search flags. Load each installed library on its own to find
+        # which, and print every import so the missing name is visible instead
+        # of inferred.
         continue-on-error: true
         shell: pwsh
         run: |
-          Get-ChildItem -Recurse sdk/pkg-unirt/lib | Select-Object FullName, Length
           python -c "import logging, unirt._ffi._api as a; logging.basicConfig(level=logging.DEBUG); a.set_log_level('trace'); a.init(); print('runtimes:', a.get_runtime_list())"
-          $plugin = "sdk/pkg-unirt/lib/llama_cpp/unirt_plugin.dll"
-          if (Get-Command dumpbin -ErrorAction SilentlyContinue) { & dumpbin /DEPENDENTS $plugin }
-          else { Write-Host 'dumpbin unavailable' }
+          python tools/ci/windows_dll_report.py sdk/pkg-unirt/lib
+          if (Get-Command dumpbin -ErrorAction SilentlyContinue) {
+            foreach ($dll in Get-ChildItem -Recurse -Filter *.dll sdk/pkg-unirt/lib) {
+              Write-Host "=== imports of $($dll.Name)"
+              & dumpbin /DEPENDENTS $dll.FullName | Select-String -Pattern '\.dll$'
+            }
+          }
       - name: Run tests
         run: python -m pytest tests/python -q
