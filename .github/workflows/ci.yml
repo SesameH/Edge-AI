@@ -190,6 +190,18 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           key: ios-sim-arm64
+      - name: Start booting a simulator
+        # simctl boot returns as soon as the request is queued, so the boot --
+        # around two minutes of it -- overlaps the build rather than following
+        # it. bootstatus below is where the job actually waits.
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          print(next(dev['udid'] for devices in data['devices'].values()
+                     for dev in devices if dev['isAvailable']))")
+          xcrun simctl boot "$UDID"
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
       - name: Configure (static libraries; plugins register in-process)
         run: >
           cmake -S sdk -B build-ios -DCMAKE_BUILD_TYPE=Release
@@ -213,16 +225,8 @@ jobs:
         run: |
           mkdir -p models
           curl -fL -o models/SmolLM2-135M-Instruct-Q8_0.gguf "$GGUF_URL"
-      - name: Boot a simulator
-        run: |
-          UDID=$(xcrun simctl list devices available -j | python3 -c "
-          import json, sys
-          data = json.load(sys.stdin)
-          print(next(dev['udid'] for devices in data['devices'].values()
-                     for dev in devices if dev['isAvailable']))")
-          xcrun simctl boot "$UDID"
-          xcrun simctl bootstatus "$UDID" -b   # wait until launchd_sim is ready
-          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+      - name: Wait for the simulator to finish booting
+        run: xcrun simctl bootstatus "$SIM_UDID" -b   # until launchd_sim is ready
       - name: Run native tests inside the simulator
         run: |
           ls -la build-ios/unirt-*-test
@@ -231,7 +235,11 @@ jobs:
           xcrun simctl spawn "$SIM_UDID" "$PWD/build-ios/unirt-static-registration-test"
           xcrun simctl spawn "$SIM_UDID" "$PWD/build-ios/unirt-inference-smoke-test" \
             "$PWD/models/SmolLM2-135M-Instruct-Q8_0.gguf"
-      - name: Build UniRT.xcframework (merges libunirt + plugin + llama.cpp into one dylib per slice)
+      - name: Build UniRT.xcframework (simulator slice; publish-sdk.yml ships both)
+        # Everything below runs in the simulator, so the iphoneos slice was
+        # compiled and never loaded -- about half this step for nothing. What
+        # ships to devices is unchanged; a device-only compile break now
+        # surfaces at release instead of here.
         run: >
           cmake -S bindings/ios/framework -B build-ios-framework-sim -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator
@@ -239,15 +247,8 @@ jobs:
           -DGGML_METAL=OFF -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache &&
           cmake --build build-ios-framework-sim -j4 &&
-          cmake -S bindings/ios/framework -B build-ios-framework-device -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos
-          -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0
-          -DGGML_METAL=OFF -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
-          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache &&
-          cmake --build build-ios-framework-device -j4 &&
           rm -rf bindings/ios/UniRT.xcframework &&
           xcodebuild -create-xcframework
-          -library build-ios-framework-device/libunirt_ios.dylib
           -library build-ios-framework-sim/libunirt_ios.dylib
           -output bindings/ios/UniRT.xcframework
       - name: Build & run Swift binding (UniRTKit) against the real plugin

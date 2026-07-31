@@ -10,6 +10,14 @@ set(GGML_BACKEND_DL OFF)
 # in the parent scope does not override.
 set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 set(LLAMA_CURL OFF)
+# Both default ON in llama.cpp and both are for its own model downloader, which
+# nothing here calls -- downloads go through huggingface_hub in the Python
+# layer. Leaving OPENSSL on links libssl/libcrypto into llama-common whenever
+# the build machine happens to have them, which is a runtime dependency the
+# user's machine then has to satisfy: the published macOS wheel points at
+# /opt/homebrew/opt/openssl@3, and on Windows the plugin fails to load outright
+# with ERROR_MOD_NOT_FOUND, since the loader deliberately does not search PATH.
+set(LLAMA_OPENSSL OFF)
 set(LLAMA_BUILD_TESTS OFF)
 set(LLAMA_BUILD_TOOLS OFF)
 set(LLAMA_BUILD_EXAMPLES OFF)
