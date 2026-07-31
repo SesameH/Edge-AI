@@ -41,12 +41,13 @@ jobs:
           path: build-mlx/install
           # Keyed on the pinned submodule commit: MLX only needs rebuilding
           # when that moves, and the build is the slowest step in this job.
-          key: mlx-install-${{ runner.os }}-${{ env.MACOS_DEPLOYMENT_TARGET }}-${{ hashFiles('.git/modules/third-party/mlx/HEAD') }}
+          key: mlx-jit-${{ runner.os }}-${{ env.MACOS_DEPLOYMENT_TARGET }}-${{ hashFiles('.git/modules/third-party/mlx/HEAD') }}
       - name: Build MLX
         if: steps.mlx-cache.outputs.cache-hit != 'true'
         run: >
           cmake -S third-party/mlx -B build-mlx -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.MACOS_DEPLOYMENT_TARGET }}
+          -DMLX_METAL_JIT=ON
           -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF
           -DCMAKE_INSTALL_PREFIX="$PWD/build-mlx/install" &&
           cmake --build build-mlx -j4 &&
@@ -73,6 +74,10 @@ jobs:
             test -f "sdk/pkg-unirt/lib/$runtime/libunirt_plugin.dylib" \
               || { echo "::error::$runtime plugin missing from the install prefix"; exit 1; }
           done
+          # Without its metallib beside it, the MLX plugin loads and then finds
+          # no Metal device -- a failure with no error attached to it.
+          test -f sdk/pkg-unirt/lib/mlx/mlx.metallib \
+            || { echo "::error::mlx.metallib missing; the MLX backend would find no device"; exit 1; }
       - name: Package macOS native libs (unirt/lib/ layout the Python binding expects)
         run: |
           mkdir -p publish

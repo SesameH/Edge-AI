@@ -36,3 +36,23 @@ set_target_properties(unirt_mlx PROPERTIES
 install(TARGETS unirt_mlx
     LIBRARY DESTINATION lib/mlx
     RUNTIME DESTINATION lib/mlx)
+
+# MLX keeps its Metal kernels in a separate mlx.metallib, and the path compiled
+# into the static library points at the machine that built MLX -- so a plugin
+# shipped anywhere else finds nothing and reports no Metal device, with the
+# backend otherwise loading fine. Its loader looks beside the calling binary
+# first (load_colocated_library in mlx/backend/metal/device.cpp), so installing
+# the metallib next to the plugin is what makes a relocatable build work.
+#
+# Build MLX with -DMLX_METAL_JIT=ON: that metallib is 1.2 MB against 124 MB for
+# the fully precompiled one, which no wheel could carry. The kernels are then
+# compiled on first use and cached by Metal.
+set(_unirt_mlx_metallib "${UNIRT_MLX_PREFIX}/lib/mlx.metallib")
+if(EXISTS "${_unirt_mlx_metallib}")
+    install(FILES "${_unirt_mlx_metallib}" DESTINATION lib/mlx)
+else()
+    message(WARNING
+        "MLX metallib not found at ${_unirt_mlx_metallib}; the installed "
+        "plugin will fall back to the path baked in when MLX was built, which "
+        "only exists on that machine")
+endif()
