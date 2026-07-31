@@ -5,14 +5,12 @@ interchangeable backends:
 
 | runtime       | models                                                | hardware                | in the published wheels |
 |---------------|-------------------------------------------------------|-------------------------|-------------------------|
-| `llama_cpp`   | GGUF (LLM, VLM, embeddings, rerank)                   | CPU, Metal on macOS     | yes                     |
-| `mlx`         | HF safetensors (SmolLM2-style Llama/ByteLevel-BPE layout; dense or MLX-quantized) | Apple Silicon Metal GPU | no — build from source  |
-| `onnxruntime` | ONNX encoder embeddings                               | CPU, Apple Core ML      | no — build from source  |
+| `llama_cpp`   | GGUF (LLM, VLM, embeddings, rerank)                   | CPU, Metal on macOS     | every wheel             |
+| `mlx`         | HF safetensors (SmolLM2-style Llama/ByteLevel-BPE layout; dense or MLX-quantized) | Apple Silicon Metal GPU | macOS wheel (Apple-only) |
+| `onnxruntime` | ONNX encoder embeddings                               | CPU, Apple Core ML      | every wheel             |
 
-Run `unirt devices` to list what your install actually has. The wheels ship the
-`llama_cpp` runtime only, built for a generic CPU baseline plus Metal on macOS —
-no CUDA and no Vulkan. The other two runtimes exist in the source tree and
-require building the SDK yourself.
+`unirt devices` lists what your install actually has. The llama_cpp runtime is
+built for a generic CPU baseline plus Metal on macOS — no CUDA, no Vulkan.
 
 The bundled llama_cpp runtime supports GGUF VLMs through libmtmd when an
 mmproj is present. MLX remains text-only and fails explicitly for VLM models.
@@ -33,6 +31,9 @@ x86_64 and arm64. Python 3.10+.
 
 ```sh
 unirt chat bartowski/SmolLM2-135M-Instruct-GGUF   # download + interactive chat
+unirt serve <model> --port 8080                   # OpenAI-compatible server
+unirt embed <encoder> "some text"                 # one vector per argument
+unirt rerank <cross-encoder> "a query" "doc one" "doc two"
 unirt pull <hf-repo>                              # download only
 unirt ls                                          # cached models
 unirt devices                                     # plugins + devices
@@ -114,6 +115,12 @@ GGUF VLMs accept image content parts when loaded with an mmproj.
 `--embedding-model <encoder>` adds `/v1/embeddings` and `--rerank-model
 <cross-encoder>` adds `/v1/rerank`; either may be given without `--model`, so a
 retrieval sidecar needs no chat model at all.
+
+Sampling takes `temperature`, `top_p`, `top_k`, `min_p`, `seed`,
+`repetition_penalty`, `presence_penalty` and `frequency_penalty`. `--api-key`
+(or `UNIRT_API_KEY`) requires `Authorization: Bearer <key>` on every `/v1`
+endpoint, leaving `/health` open for probes — worth setting whenever `--host`
+is not loopback.
 
 The native library is closed-source and ships prebuilt. A wheel already bundles
 it under `unirt/lib/`; a source checkout is discovered at

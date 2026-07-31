@@ -16,6 +16,9 @@ Endpoints:
     POST /v1/chat/completions   (supports "stream": true via SSE)
     POST /v1/embeddings         (requires --embedding-model)
     POST /v1/rerank             (requires --rerank-model; the Cohere/Jina shape)
+
+--api-key (or UNIRT_API_KEY) requires Authorization: Bearer <key> on every /v1
+endpoint; GET / and /health stay open for liveness probes.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hmac
 import json
 import math
 import os
@@ -256,6 +260,35 @@ def _parse_generation_args(req: dict) -> dict:
         'top_p': top_p,
         'seed': seed,
     }
+
+    # presence_penalty and frequency_penalty are standard OpenAI fields and
+    # top_k / min_p / repetition_penalty are what every local runtime exposes;
+    # the sampler behind unirt_SamplerConfig takes all five. Passing them
+    # through beats accepting them and quietly changing nothing, which is
+    # indistinguishable from the parameter having no effect on the model.
+    for name, low, high in (
+        ('top_k', 0, 2**31 - 1),
+        ('min_p', 0.0, 1.0),
+        ('repetition_penalty', 0.0, 4.0),
+        ('presence_penalty', -2.0, 2.0),
+        ('frequency_penalty', -2.0, 2.0),
+    ):
+        value = req.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f'{name} must be a number')
+        if name == 'top_k':
+            if not isinstance(value, int):
+                raise ValueError('top_k must be an integer')
+        else:
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError(f'{name} must be finite')
+        if not low <= value <= high:
+            raise ValueError(f'{name} must be between {low} and {high}')
+        result[name] = value
+
     stop = req.get('stop')
     if isinstance(stop, str):
         if '\x00' in stop:
@@ -496,6 +529,34 @@ class Handler(BaseHTTPRequestHandler):
             extra_headers={'Retry-After': '1'},
         )
 
+    def _authorized(self) -> bool:
+        """Check the bearer token when one is configured.
+
+        Without --api-key the server is open, which is right for the default
+        127.0.0.1 bind and wrong the moment anyone passes --host 0.0.0.0.
+        Compared with compare_digest so the check does not leak the key's
+        length or a matching prefix through timing.
+        """
+
+        expected = self.server.api_key
+        if expected is None:
+            return True
+        header = self.headers.get('Authorization', '')
+        scheme, _, token = header.partition(' ')
+        if scheme.lower() != 'bearer' or not hmac.compare_digest(token.strip(), expected):
+            self._json(
+                401,
+                {'error': {
+                    'message': 'missing or invalid API key; send '
+                               'Authorization: Bearer <key>',
+                    'type': 'invalid_request_error',
+                    'code': 'invalid_api_key',
+                }},
+                extra_headers={'WWW-Authenticate': 'Bearer'},
+            )
+            return False
+        return True
+
     def _read_json_body(self) -> dict | None:
         """Read and parse one JSON object body, or answer the error and return None."""
 
@@ -531,6 +592,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         model_id = self.server.model_id
+        if self.path in ('/', '/health'):
+            # Deliberately unauthenticated: liveness probes and container
+            # healthchecks should not need the key, and it discloses nothing
+            # beyond the fact that a server is listening.
+            self._json(200, {'status': 'ok', 'model': model_id})
+            return
+        if not self._authorized():
+            return
         if self.path == '/v1/models':
             listed = [
                 {'id': name, 'object': 'model', 'owned_by': 'unirt'}
@@ -547,13 +616,13 @@ class Handler(BaseHTTPRequestHandler):
                 if handle is not None
             )
             self._json(200, served.runtime_stats())
-        elif self.path in ('/', '/health'):
-            self._json(200, {'status': 'ok', 'model': model_id})
         else:
             self._error(404, f'unknown path {self.path}')
 
     def do_POST(self):
         self._response_started = False
+        if not self._authorized():
+            return
         if self.path == '/v1/embeddings':
             self._handle_embeddings()
             return
@@ -857,6 +926,7 @@ class UniRTHTTPServer(ThreadingHTTPServer):
         reuse_prefix: bool = True,
         reranker=None,
         reranker_id: str | None = None,
+        api_key: str | None = None,
     ):
         self.model = model
         self.model_id = model_id
@@ -864,6 +934,7 @@ class UniRTHTTPServer(ThreadingHTTPServer):
         self.embedding_id = embedding_id
         self.reranker = reranker
         self.reranker_id = reranker_id
+        self.api_key = api_key
         self.reuse_prefix = reuse_prefix
         self.capabilities = model.capabilities() if isinstance(model, UniRTVLM) else None
         self.gen_lock = threading.Lock()
@@ -886,12 +957,13 @@ def serve(
     reuse_prefix: bool = True,
     reranker=None,
     reranker_id: str | None = None,
+    api_key: str | None = None,
 ) -> None:
     """Serve until interrupted, then stop accepting and join active requests."""
 
     server = UniRTHTTPServer(
         (host, port), model, model_id, max_queued_requests, embedding, embedding_id,
-        reuse_prefix, reranker, reranker_id,
+        reuse_prefix, reranker, reranker_id, api_key,
     )
     previous_handlers: dict[int, object] = {}
 
@@ -919,7 +991,7 @@ def serve(
                 pass
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description='OpenAI-compatible server over a UniRT model')
     ap.add_argument(
         '--model',
@@ -947,6 +1019,13 @@ def main() -> None:
         default='auto',
         help='device for the reranker: auto, cpu, gpu, npu (default: auto)',
     )
+    ap.add_argument(
+        '--api-key',
+        help='require Authorization: Bearer <key> on every /v1 request. Without '
+             'it the server is open, which is fine on the default 127.0.0.1 bind '
+             'and not fine with --host 0.0.0.0. UNIRT_API_KEY sets it too, which '
+             'keeps the key out of the process list',
+    )
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=8080)
     ap.add_argument(
@@ -970,11 +1049,12 @@ def main() -> None:
         help='requests may queue waiting for the (serialized) model before '
              'the server starts returning 503 (default: 8)',
     )
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     if args.n_ctx < 0:
         ap.error('--n-ctx must be >= 0')
     if args.max_queued_requests < 1:
         ap.error('--max-queued-requests must be >= 1')
+    api_key = args.api_key or os.environ.get('UNIRT_API_KEY') or None
     if not args.model and not args.embedding_model and not args.rerank_model:
         ap.error('at least one of --model, --embedding-model or --rerank-model is required')
 
@@ -1023,6 +1103,11 @@ def main() -> None:
             stats = reranker.runtime_stats()
             served.append(f"rerank on {stats.get('device_name') or '?'}")
 
+        if api_key:
+            served.append('API key required')
+        elif args.host not in ('127.0.0.1', 'localhost', '::1'):
+            print(f'warning: listening on {args.host} with no --api-key -- '
+                  'anything that can reach this port can use the model')
         print(f"ready on http://{args.host}:{args.port}/v1  ({'; '.join(served)})")
         serve(
             model,
@@ -1035,6 +1120,7 @@ def main() -> None:
             not args.no_prefix_cache,
             reranker,
             reranker_id,
+            api_key,
         )
     finally:
         for handle in (model, embedding, reranker):

@@ -897,3 +897,154 @@ def test_rerank_ranks_a_real_corpus(sdk):
     assert 'Paris' in body['results'][0]['document']['text']
     assert body['results'][0]['relevance_score'] > body['results'][-1]['relevance_score']
     assert all(0.0 <= entry['relevance_score'] <= 1.0 for entry in body['results'])
+
+
+@pytest.mark.parametrize(('field', 'value'), [
+    ('top_k', 40),
+    ('min_p', 0.05),
+    ('repetition_penalty', 1.1),
+    ('presence_penalty', 0.6),
+    ('frequency_penalty', -0.4),
+])
+def test_sampler_parameters_reach_the_model(field, value):
+    """Accepting a sampling parameter and then dropping it looks exactly like
+    the parameter having no effect on the model."""
+    assert _parse_generation_args({field: value})[field] == value
+
+
+def test_sampler_parameters_are_absent_when_not_requested():
+    """Anything not sent must stay unset so the plugin's own default applies,
+    rather than being pinned to a zero the caller never asked for."""
+    parsed = _parse_generation_args({})
+    for field in ('top_k', 'min_p', 'repetition_penalty',
+                  'presence_penalty', 'frequency_penalty'):
+        assert field not in parsed
+
+
+@pytest.mark.parametrize('payload', [
+    {'top_k': -1},
+    {'top_k': 1.5},
+    {'top_k': True},
+    {'min_p': 1.5},
+    {'min_p': float('nan')},
+    {'repetition_penalty': -1},
+    {'presence_penalty': 3},
+    {'frequency_penalty': -3},
+    {'frequency_penalty': 'high'},
+])
+def test_bad_sampler_parameters_are_client_errors(payload):
+    with pytest.raises(ValueError):
+        _parse_generation_args(payload)
+
+
+def test_sampler_parameters_survive_the_http_round_trip():
+    """The parser is only half of it -- the values have to arrive at generate()."""
+    class Recorder(FakeModel):
+        def __init__(self):
+            super().__init__()
+            self.kwargs = None
+
+        def generate(self, prompt, **kwargs):
+            self.kwargs = kwargs
+            return super().generate(prompt, **{})
+
+    model = Recorder()
+    status, _ = _post_to(
+        server.UniRTHTTPServer(('127.0.0.1', 0), model, 'fake-model'),
+        '/v1/chat/completions',
+        {
+            'messages': [{'role': 'user', 'content': 'hi'}],
+            'top_k': 40, 'min_p': 0.05, 'repetition_penalty': 1.1,
+            'presence_penalty': 0.6, 'frequency_penalty': -0.4,
+        },
+    )
+    assert status == 200
+    assert model.kwargs['top_k'] == 40
+    assert model.kwargs['min_p'] == pytest.approx(0.05)
+    assert model.kwargs['repetition_penalty'] == pytest.approx(1.1)
+    assert model.kwargs['presence_penalty'] == pytest.approx(0.6)
+    assert model.kwargs['frequency_penalty'] == pytest.approx(-0.4)
+
+
+def _keyed_server(api_key):
+    return server.UniRTHTTPServer(
+        ('127.0.0.1', 0), FakeModel(), 'fake-model', 8, None, None, True, None, None, api_key
+    )
+
+
+def _request(httpd, method, path, headers=None, payload=None):
+    import http.client
+
+    port = httpd.server_address[1]
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            body = json.dumps(payload).encode() if payload is not None else None
+            sent = dict(headers or {})
+            if body is not None:
+                sent.update({'Content-Type': 'application/json',
+                             'Content-Length': str(len(body))})
+            connection.request(method, path, body=body, headers=sent)
+            response = connection.getresponse()
+            raw = response.read()
+            return response.status, response.getheader('WWW-Authenticate'), raw
+        finally:
+            connection.close()
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+
+
+_CHAT = {'messages': [{'role': 'user', 'content': 'hi'}]}
+
+
+@pytest.mark.parametrize(('method', 'path', 'payload'), [
+    ('GET', '/v1/models', None),
+    ('GET', '/v1/stats', None),
+    ('POST', '/v1/chat/completions', _CHAT),
+])
+def test_api_key_is_required_on_every_v1_endpoint(method, path, payload):
+    status, challenge, _ = _request(_keyed_server('s3cret'), method, path, payload=payload)
+    assert status == 401
+    assert challenge == 'Bearer'
+
+
+def test_api_key_admits_the_right_bearer_token():
+    status, _, raw = _request(
+        _keyed_server('s3cret'), 'POST', '/v1/chat/completions',
+        headers={'Authorization': 'Bearer s3cret'}, payload=_CHAT,
+    )
+    assert status == 200
+    assert json.loads(raw)['choices'][0]['message']['content'] == 'ok'
+
+
+@pytest.mark.parametrize('header', [
+    'Bearer wrong',
+    'Bearer s3cre',          # a prefix of the real key
+    'Bearer s3cretX',
+    'Basic s3cret',          # right secret, wrong scheme
+    's3cret',                # no scheme
+    '',
+])
+def test_api_key_rejects_anything_but_an_exact_bearer_match(header):
+    status, _, _ = _request(
+        _keyed_server('s3cret'), 'POST', '/v1/chat/completions',
+        headers={'Authorization': header}, payload=_CHAT,
+    )
+    assert status == 401
+
+
+def test_health_stays_open_so_probes_do_not_need_the_key():
+    """A container healthcheck should not have to carry the secret, and the
+    reply discloses nothing beyond the fact that something is listening."""
+    status, _, raw = _request(_keyed_server('s3cret'), 'GET', '/health')
+    assert status == 200
+    assert json.loads(raw)['status'] == 'ok'
+
+
+def test_no_api_key_configured_leaves_the_server_open():
+    status, _, _ = _request(_keyed_server(None), 'GET', '/v1/models')
+    assert status == 200

@@ -19,6 +19,30 @@ wheels and assets are collected.
 It defaults to `v0.0.0`, and that default is what `unirt version` reports back
 to the user as the SDK version — 0.2.2 shipped saying `SDK: v0.0.0`.
 
+**A release build must also produce every runtime the docs promise.** Both
+optional plugins are skipped silently when their dependency is missing —
+`UNIRT_PLUGIN_MLX` needs a separately built static MLX, and the ONNX Runtime
+plugin prints a warning and `return()`s when `UNIRT_ONNXRUNTIME_ROOT` is unset.
+A wheel with a runtime quietly missing looks identical to one without, so check
+the install prefix before building the wheel:
+
+```sh
+cmake -S third-party/mlx -B build-mlx -DCMAKE_BUILD_TYPE=Release \
+    -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_INSTALL_PREFIX="$PWD/build-mlx/install"
+cmake --build build-mlx -j8 && cmake --install build-mlx      # macOS only
+
+ORT=1.26.0                                    # per-platform SDK, see README.md
+cmake -S sdk -B build -DCMAKE_BUILD_TYPE=Release -DUNIRT_VERSION=v<version> \
+    -DUNIRT_ONNXRUNTIME_ROOT="$PWD/build-onnxruntime/onnxruntime-osx-arm64-$ORT"
+cmake --build build -j8 && cmake --install build --prefix sdk/pkg-unirt
+
+ls sdk/pkg-unirt/lib/*/            # llama_cpp, mlx (macOS), onnxruntime
+```
+
+The published wheels carry `llama_cpp` and `onnxruntime` everywhere, plus `mlx`
+on macOS. `unirt devices` from the installed wheel is the end-to-end check.
+
 Per-platform build commands are in `publish-sdk.yml`; the common entry point is:
 
 ```sh

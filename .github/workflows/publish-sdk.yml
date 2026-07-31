@@ -11,6 +11,7 @@ on:
 
 env:
   UNIRT_SDK_REPO: SesameH/unirt-sdk
+  ORT_VERSION: 1.26.0
   GGUF_URL: https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
 
 jobs:
@@ -26,14 +27,45 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           key: publish-macos-arm64
+      - name: Fetch MLX submodule
+        run: git submodule update --init --depth 1 third-party/mlx
+      - name: Cache the MLX static library
+        id: mlx-cache
+        uses: actions/cache@v4
+        with:
+          path: build-mlx/install
+          # Keyed on the pinned submodule commit: MLX only needs rebuilding
+          # when that moves, and the build is the slowest step in this job.
+          key: mlx-install-${{ runner.os }}-${{ hashFiles('.git/modules/third-party/mlx/HEAD') }}
+      - name: Build MLX
+        if: steps.mlx-cache.outputs.cache-hit != 'true'
+        run: >
+          cmake -S third-party/mlx -B build-mlx -DCMAKE_BUILD_TYPE=Release
+          -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF
+          -DCMAKE_INSTALL_PREFIX="$PWD/build-mlx/install" &&
+          cmake --build build-mlx -j4 &&
+          cmake --install build-mlx
+      - name: Fetch the ONNX Runtime SDK
+        run: |
+          mkdir -p build-onnxruntime
+          curl -fsSL -o build-onnxruntime/ort.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-arm64-${ORT_VERSION}.tgz"
+          tar -xzf build-onnxruntime/ort.tgz -C build-onnxruntime
       - name: Build + install macOS native libs
         run: >
           cmake -S sdk -B build -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DUNIRT_VERSION=${{ github.ref_name }}
-          -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF &&
+          -DUNIRT_ONNXRUNTIME_ROOT="$PWD/build-onnxruntime/onnxruntime-osx-arm64-${ORT_VERSION}" &&
           cmake --build build -j4 &&
           cmake --install build --prefix sdk/pkg-unirt
+      - name: Every runtime this wheel promises must be in it
+        run: |
+          set -e
+          for runtime in llama_cpp mlx onnxruntime; do
+            test -f "sdk/pkg-unirt/lib/$runtime/libunirt_plugin.dylib" \
+              || { echo "::error::$runtime plugin missing from the install prefix"; exit 1; }
+          done
       - name: Package macOS native libs (unirt/lib/ layout the Python binding expects)
         run: |
           mkdir -p publish
@@ -98,10 +130,12 @@ jobs:
             image: quay.io/pypa/manylinux_2_28_x86_64
             arch: x86_64
             platform_tag: manylinux_2_28_x86_64
+            ort_arch: linux-x64
           - runner: ubuntu-24.04-arm
             image: quay.io/pypa/manylinux_2_28_aarch64
             arch: aarch64
             platform_tag: manylinux_2_28_aarch64
+            ort_arch: linux-aarch64
     runs-on: ${{ matrix.runner }}
     container:
       image: ${{ matrix.image }}
@@ -115,17 +149,28 @@ jobs:
           echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
           /opt/python/cp312-cp312/bin/python -m pip install --quiet \
             auditwheel build cmake ninja wheel
+      - name: Fetch the ONNX Runtime SDK
+        run: |
+          mkdir -p build-onnxruntime
+          curl -fsSL -o build-onnxruntime/ort.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_arch }}-${ORT_VERSION}.tgz"
+          tar -xzf build-onnxruntime/ort.tgz -C build-onnxruntime
       - name: Build + install native runtime
         run: |
           cmake -S sdk -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DUNIRT_VERSION="${GITHUB_REF_NAME}" \
             -DUNIRT_PLUGIN_MLX=OFF \
-            -DUNIRT_PLUGIN_ONNXRUNTIME=OFF \
+            -DUNIRT_ONNXRUNTIME_ROOT="$PWD/build-onnxruntime/onnxruntime-${{ matrix.ort_arch }}-${ORT_VERSION}" \
             -DUNIRT_NATIVE_TESTS=OFF \
             -DUNIRT_PYTHON_TESTS=OFF
           cmake --build build -j4
           cmake --install build --prefix sdk/pkg-unirt
+          # MLX is Apple-only, so Linux ships two runtimes and both must be here.
+          for runtime in llama_cpp onnxruntime; do
+            test -f "sdk/pkg-unirt/lib/$runtime/libunirt_plugin.so" \
+              || { echo "::error::$runtime plugin missing from the install prefix"; exit 1; }
+          done
       - name: Build + audit + smoke-test wheel
         run: |
           set -e
@@ -169,10 +214,12 @@ jobs:
           - runner: windows-latest
             arch: x64
             platform_tag: win_amd64
+            ort_arch: win-x64
             cmake_flags: -G Ninja -DCMAKE_BUILD_TYPE=Release
           - runner: windows-11-arm
             arch: arm64
             platform_tag: win_arm64
+            ort_arch: win-arm64
             cmake_flags: >-
               -G "Ninja Multi-Config"
               -DCMAKE_TOOLCHAIN_FILE=../third-party/llama.cpp/cmake/arm64-windows-llvm.cmake
@@ -198,12 +245,18 @@ jobs:
           python-version: '3.12'
       - name: Install Python build tools
         run: python -m pip install --quiet build delvewheel wheel
+      - name: Fetch the ONNX Runtime SDK
+        run: |
+          New-Item -ItemType Directory -Force -Path build-onnxruntime | Out-Null
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$env:ORT_VERSION/onnxruntime-${{ matrix.ort_arch }}-$env:ORT_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile build-onnxruntime/ort.zip
+          Expand-Archive -Path build-onnxruntime/ort.zip -DestinationPath build-onnxruntime -Force
       - name: Build + install native runtime
         run: >
           cmake -S sdk -B build ${{ matrix.cmake_flags }}
           -DUNIRT_VERSION=${{ github.ref_name }}
           -DUNIRT_PLUGIN_MLX=OFF
-          -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
+          -DUNIRT_ONNXRUNTIME_ROOT="${{ github.workspace }}/build-onnxruntime/onnxruntime-${{ matrix.ort_arch }}-${{ env.ORT_VERSION }}"
           -DUNIRT_NATIVE_TESTS=OFF
           -DUNIRT_PYTHON_TESTS=OFF
           &&

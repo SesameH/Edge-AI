@@ -436,6 +436,46 @@ def _cmd_embed(arguments: argparse.Namespace) -> int:
         model.close()
 
 
+def _cmd_rerank(arguments: argparse.Namespace) -> int:
+    model = AutoModelForEmbedding.from_pretrained(
+        arguments.model,
+        precision=arguments.precision,
+        device_map=arguments.device,
+    )
+    try:
+        scores = model.rerank(arguments.query, arguments.documents)
+    finally:
+        model.close()
+    ranked = sorted(zip(scores, arguments.documents), key=lambda pair: pair[0], reverse=True)
+    if arguments.json:
+        print(json.dumps(
+            [{'index': arguments.documents.index(text), 'score': score, 'document': text}
+             for score, text in ranked],
+            ensure_ascii=False,
+        ))
+        return 0
+    for score, text in ranked:
+        print(f'{score:9.4f}  {text}')
+    return 0
+
+
+def _cmd_serve(arguments: argparse.Namespace) -> int:
+    # Imported here rather than at module scope: the server pulls in the whole
+    # tool-calling and HTTP stack, which every other subcommand would pay for.
+    from . import server as _server
+
+    forwarded: list[str] = []
+    for name in ('model', 'backend', 'embedding_model', 'embedding_device',
+                 'rerank_model', 'rerank_device', 'host', 'port', 'n_ctx',
+                 'api_key', 'max_queued_requests'):
+        value = getattr(arguments, name, None)
+        if value is not None:
+            forwarded += [f"--{name.replace('_', '-')}", str(value)]
+    if arguments.no_prefix_cache:
+        forwarded.append('--no-prefix-cache')
+    return _server.main(forwarded) or 0
+
+
 def _human_size(byte_count: int) -> str:
     size = float(byte_count)
     for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
@@ -658,6 +698,37 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     embed.add_argument('--no-normalize', action='store_true')
     embed.set_defaults(func=_cmd_embed)
+
+    rerank = commands.add_parser(
+        'rerank',
+        help='Score documents against a query with a cross-encoder',
+    )
+    rerank.add_argument('model', help='Hugging Face repo id or local bundle')
+    rerank.add_argument('query')
+    rerank.add_argument('documents', nargs='+', help='One or more documents to score')
+    rerank.add_argument('--precision', default=None)
+    rerank.add_argument('--device', choices=['auto', 'cpu', 'gpu', 'npu'], default='auto')
+    rerank.add_argument('--json', action='store_true', help='Emit JSON instead of a table')
+    rerank.set_defaults(func=_cmd_rerank)
+
+    serve = commands.add_parser(
+        'serve',
+        help='Run the OpenAI-compatible HTTP server',
+    )
+    serve.add_argument('model', nargs='?', help='Chat model; optional if a '
+                                                'retrieval model is given')
+    serve.add_argument('--backend', choices=['llama_cpp', 'mlx'], default='llama_cpp')
+    serve.add_argument('--embedding-model', help='Text encoder for /v1/embeddings')
+    serve.add_argument('--embedding-device', default='auto')
+    serve.add_argument('--rerank-model', help='Cross-encoder for /v1/rerank')
+    serve.add_argument('--rerank-device', default='auto')
+    serve.add_argument('--host', default='127.0.0.1')
+    serve.add_argument('--port', type=int, default=8080)
+    serve.add_argument('--n-ctx', type=int, default=0)
+    serve.add_argument('--api-key', help='Require Authorization: Bearer <key>')
+    serve.add_argument('--no-prefix-cache', action='store_true')
+    serve.add_argument('--max-queued-requests', type=int, default=8)
+    serve.set_defaults(func=_cmd_serve)
 
     listing = commands.add_parser('ls', help='List cached models or show one manifest')
     listing.add_argument('model', nargs='?')

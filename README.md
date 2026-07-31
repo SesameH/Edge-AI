@@ -237,6 +237,14 @@ ties the two wrong answers, the cross-encoder does not:
 model card prescribes — the ranking is identical either way, and
 `UniRTEmbedding.rerank()` still returns raw logits.
 
+Sampling accepts `temperature`, `top_p`, `top_k`, `min_p`, `seed`,
+`repetition_penalty`, `presence_penalty` and `frequency_penalty` — anything the
+native sampler takes, rather than silently dropping the ones OpenAI clients
+send. `--api-key` (or `UNIRT_API_KEY`) requires `Authorization: Bearer <key>`
+on every `/v1` endpoint; `/health` stays open for probes. Without it the server
+is open to anything that can reach the port, which is why it warns when
+`--host` is not a loopback address.
+
 Chat requests reuse cached KV across calls, so a resent transcript only
 prefills its new suffix (measured on SmolLM2-135M: 165 ms → 65 ms by the second
 turn, 232 ms → 71 ms by the fourth, and the gap keeps widening with the
