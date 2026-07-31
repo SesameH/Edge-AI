@@ -34,7 +34,7 @@ core=$(cd "$(dirname "$0")/../.." && pwd)
 # CI, must not have one. That is the only difference from the workflow.
 sedi() { sed -i '' "$@"; }
 
-rsync -a --delete --exclude unirt/lib --exclude LICENSE --exclude README.md \
+rsync -a --delete --exclude unirt/lib --exclude LICENSE \
     "$core/bindings/python/" "$sdk/python/"
 rsync -a --delete "$core/bindings/android/kotlin/" "$sdk/android/kotlin/"
 rsync -a --delete "$core/bindings/android/test/" "$sdk/android/test/"

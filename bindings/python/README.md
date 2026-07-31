@@ -3,11 +3,16 @@
 Python binding for the UniRT SDK — run LLMs locally through a single API with
 interchangeable backends:
 
-| runtime     | models                                               | hardware                    |
-|-------------|------------------------------------------------------|-----------------------------|
-| `llama_cpp` | GGUF                                                 | CPU / Metal / Vulkan / CUDA |
-| `mlx`       | HF safetensors (validated SmolLM2-style Llama/ByteLevel-BPE layout; dense or MLX-quantized) | Apple Silicon Metal GPU |
-| `onnxruntime` | ONNX encoder embeddings                         | CPU / Apple Core ML     |
+| runtime       | models                                                | hardware                | in the published wheels |
+|---------------|-------------------------------------------------------|-------------------------|-------------------------|
+| `llama_cpp`   | GGUF (LLM, VLM, embeddings, rerank)                   | CPU, Metal on macOS     | yes                     |
+| `mlx`         | HF safetensors (SmolLM2-style Llama/ByteLevel-BPE layout; dense or MLX-quantized) | Apple Silicon Metal GPU | no — build from source  |
+| `onnxruntime` | ONNX encoder embeddings                               | CPU, Apple Core ML      | no — build from source  |
+
+Run `unirt devices` to list what your install actually has. The wheels ship the
+`llama_cpp` runtime only, built for a generic CPU baseline plus Metal on macOS —
+no CUDA and no Vulkan. The other two runtimes exist in the source tree and
+require building the SDK yourself.
 
 The bundled llama_cpp runtime supports GGUF VLMs through libmtmd when an
 mmproj is present. MLX remains text-only and fails explicitly for VLM models.
@@ -20,7 +25,9 @@ fails before native model allocation.
 pip install unirt
 ```
 
-macOS arm64 wheels ship every native library — no toolchain, no build step.
+Wheels ship the native libraries — no toolchain, no build step — for macOS 14+
+arm64, Linux x86_64 and arm64 (`manylinux_2_31`, glibc 2.31+), and Windows 10+
+x86_64 and arm64. Python 3.10+.
 
 ## Quickstart (CLI)
 
@@ -108,7 +115,9 @@ GGUF VLMs accept image content parts when loaded with an mmproj.
 <cross-encoder>` adds `/v1/rerank`; either may be given without `--model`, so a
 retrieval sidecar needs no chat model at all.
 
-The native library is discovered automatically from `<repo>/sdk/pkg-unirt/lib`
-(dev layout) or the packaged wheel; set `UNIRT_LIB_PATH` / `UNIRT_PLUGIN_PATH`
-to override. See the repository README for build instructions, the interactive
-chat example, and the OpenAI-compatible server (`python3 -m unirt.server`).
+The native library is closed-source and ships prebuilt. A wheel already bundles
+it under `unirt/lib/`; a source checkout is discovered at
+`<repo>/sdk/pkg-unirt/lib` after building the SDK, and installing from source
+without building means populating `unirt/lib/` yourself from a Release's
+native-libs archive before `pip install .`. `UNIRT_LIB_PATH` /
+`UNIRT_PLUGIN_PATH` override the search.

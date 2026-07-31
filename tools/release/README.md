@@ -15,6 +15,10 @@ wheels and assets are collected.
 
 ## 1. Build the wheels
 
+**Every `cmake -S sdk` for a release must pass `-DUNIRT_VERSION=v<version>.**
+It defaults to `v0.0.0`, and that default is what `unirt version` reports back
+to the user as the SDK version — 0.2.2 shipped saying `SDK: v0.0.0`.
+
 Per-platform build commands are in `publish-sdk.yml`; the common entry point is:
 
 ```sh

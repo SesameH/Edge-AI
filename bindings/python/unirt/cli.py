@@ -565,11 +565,11 @@ def _cmd_recommend(arguments: argparse.Namespace) -> int:
     _render_table(rows, ['ALIAS', 'TASK', 'BACKEND', 'DOWNLOAD', 'NEEDS', 'CACHED', 'NOTES'])
     top = entries[0]
     run = (
-        f'unirt-py embed {top.alias} "some text"'
+        f'unirt embed {top.alias} "some text"'
         if top.task == 'embed'
-        else f'unirt-py chat {top.alias}'
+        else f'unirt chat {top.alias}'
     )
-    print(f'\nDownload one with:  unirt-py pull {top.alias}')
+    print(f'\nDownload one with:  unirt pull {top.alias}')
     print(f'Then run it:        {run}')
     return 0
 
@@ -603,7 +603,7 @@ def _add_hub_args(parser: argparse.ArgumentParser) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog='unirt-py',
+        prog='unirt',
         description='UniRT Python CLI',
     )
     parser.add_argument(
@@ -634,7 +634,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default='auto',
         help=(
             "'auto' | 'cpu' | 'gpu' | 'npu' | 'hybrid' | '<plugin>' | "
-            "'<plugin>:<device>' (default: auto; run 'unirt-py devices' to list ids)"
+            "'<plugin>:<device>' (default: auto; run 'unirt devices' to list ids)"
         ),
     )
     _add_hub_args(chat)

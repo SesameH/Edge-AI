@@ -30,6 +30,7 @@ jobs:
         run: >
           cmake -S sdk -B build -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DUNIRT_VERSION=${{ github.ref_name }}
           -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF &&
           cmake --build build -j4 &&
           cmake --install build --prefix sdk/pkg-unirt
@@ -55,12 +56,14 @@ jobs:
       - name: Build UniRT.xcframework
         run: >
           cmake -S bindings/ios/framework -B build-ios-framework-sim -DCMAKE_BUILD_TYPE=Release
+          -DUNIRT_VERSION=${{ github.ref_name }}
           -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator
           -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0
           -DGGML_METAL=OFF -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache &&
           cmake --build build-ios-framework-sim -j4 &&
           cmake -S bindings/ios/framework -B build-ios-framework-device -DCMAKE_BUILD_TYPE=Release
+          -DUNIRT_VERSION=${{ github.ref_name }}
           -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos
           -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0
           -DGGML_METAL=OFF -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
@@ -116,6 +119,7 @@ jobs:
         run: |
           cmake -S sdk -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DUNIRT_VERSION="${GITHUB_REF_NAME}" \
             -DUNIRT_PLUGIN_MLX=OFF \
             -DUNIRT_PLUGIN_ONNXRUNTIME=OFF \
             -DUNIRT_NATIVE_TESTS=OFF \
@@ -197,6 +201,7 @@ jobs:
       - name: Build + install native runtime
         run: >
           cmake -S sdk -B build ${{ matrix.cmake_flags }}
+          -DUNIRT_VERSION=${{ github.ref_name }}
           -DUNIRT_PLUGIN_MLX=OFF
           -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
           -DUNIRT_NATIVE_TESTS=OFF
@@ -297,7 +302,7 @@ jobs:
       - name: Sync wrapper source (bindings only — sdk/plugins/third-party never leave this repo)
         run: |
           set -e
-          rsync -a --delete --exclude unirt/lib --exclude LICENSE --exclude README.md \
+          rsync -a --delete --exclude unirt/lib --exclude LICENSE \
             core/bindings/python/ unirt-sdk/python/
           rsync -a --delete core/bindings/android/kotlin/ unirt-sdk/android/kotlin/
           rsync -a --delete core/bindings/android/test/ unirt-sdk/android/test/

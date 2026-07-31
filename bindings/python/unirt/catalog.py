@@ -98,7 +98,7 @@ CATALOG: tuple[Entry, ...] = (
 
     # --- embeddings (ONNX Runtime)
     # No quant token: ONNX variants are chosen at encode time via
-    # `unirt-py embed --precision`, not by a repo:precision pull target.
+    # `unirt embed --precision`, not by a repo:precision pull target.
     Entry('minilm', 'sentence-transformers/all-MiniLM-L6-v2', 'onnxruntime', 'embed', 0.09,
           'Sentence embeddings; add --precision qint8_arm64 for the 23 MiB build.'),
 
