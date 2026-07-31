@@ -58,9 +58,16 @@ jobs:
         with:
           key: macos-arm64
       - name: Configure
+        # GGML_METAL=OFF: the macOS runners are virtualised, and every model
+        # load recompiles the Metal shader library on them. Identical suite,
+        # 10s on Linux and Windows against 29m35s here. What that measures is
+        # the runner's paravirtualised GPU, not Metal on real hardware -- which
+        # is exercised locally on every dev machine -- so CI covers the CPU
+        # path and stops holding the whole pipeline at half an hour.
         run: >
           cmake -S sdk -B build -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DGGML_METAL=OFF
           -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
       - name: Build
         run: cmake --build build -j4
@@ -84,19 +91,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e bindings/python pytest
-      - name: Plugin load diagnostics
-        # The loader reports the OS error, but it does so during init(), whose
-        # captured log pytest attaches to no particular test -- so a plugin that
-        # fails to load shows up only as 26 downstream errors. Print the scan
-        # result, and the DLL's dependency list, before the suite runs.
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          Get-ChildItem -Recurse sdk/pkg-unirt/lib | Select-Object FullName, Length
-          python -c "import logging, unirt._ffi._api as a; logging.basicConfig(level=logging.DEBUG); a.set_log_level('trace'); a.init(); print('runtimes:', a.get_runtime_list())"
-          $plugin = "sdk/pkg-unirt/lib/llama_cpp/unirt_plugin.dll"
-          $dumpbin = Get-Command dumpbin -ErrorAction SilentlyContinue
-          if ($dumpbin) { & dumpbin /DEPENDENTS $plugin } else { Write-Host 'dumpbin unavailable' }
       - name: Run tests
         run: python -m pytest tests/python -q
 
@@ -352,5 +346,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e bindings/python pytest
+      - name: Plugin load diagnostics
+        # The loader does report the LoadLibraryExW error, but during init(),
+        # whose captured log pytest attaches to no particular test -- a plugin
+        # that fails to load then surfaces only as dozens of downstream errors
+        # with no cause anywhere in the run output.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse sdk/pkg-unirt/lib | Select-Object FullName, Length
+          python -c "import logging, unirt._ffi._api as a; logging.basicConfig(level=logging.DEBUG); a.set_log_level('trace'); a.init(); print('runtimes:', a.get_runtime_list())"
+          $plugin = "sdk/pkg-unirt/lib/llama_cpp/unirt_plugin.dll"
+          if (Get-Command dumpbin -ErrorAction SilentlyContinue) { & dumpbin /DEPENDENTS $plugin }
+          else { Write-Host 'dumpbin unavailable' }
       - name: Run tests
         run: python -m pytest tests/python -q
