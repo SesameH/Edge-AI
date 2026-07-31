@@ -12,6 +12,11 @@ on:
 env:
   UNIRT_SDK_REPO: SesameH/unirt-sdk
   ORT_VERSION: 1.26.0
+  # The macOS the wheels promise, in both the platform tag and the binaries.
+  # Without it CMAKE_OSX_DEPLOYMENT_TARGET follows the build machine, and the
+  # runner image moving to macOS 26 silently made every dylib require 26.4.
+  MACOS_DEPLOYMENT_TARGET: '14.0'
+  MACOS_PLATFORM_TAG: macosx_14_0_arm64
   GGUF_URL: https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
 
 jobs:
@@ -36,11 +41,12 @@ jobs:
           path: build-mlx/install
           # Keyed on the pinned submodule commit: MLX only needs rebuilding
           # when that moves, and the build is the slowest step in this job.
-          key: mlx-install-${{ runner.os }}-${{ hashFiles('.git/modules/third-party/mlx/HEAD') }}
+          key: mlx-install-${{ runner.os }}-${{ env.MACOS_DEPLOYMENT_TARGET }}-${{ hashFiles('.git/modules/third-party/mlx/HEAD') }}
       - name: Build MLX
         if: steps.mlx-cache.outputs.cache-hit != 'true'
         run: >
           cmake -S third-party/mlx -B build-mlx -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.MACOS_DEPLOYMENT_TARGET }}
           -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF
           -DCMAKE_INSTALL_PREFIX="$PWD/build-mlx/install" &&
           cmake --build build-mlx -j4 &&
@@ -54,6 +60,7 @@ jobs:
       - name: Build + install macOS native libs
         run: >
           cmake -S sdk -B build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.MACOS_DEPLOYMENT_TARGET }}
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DUNIRT_VERSION=${{ github.ref_name }}
           -DUNIRT_ONNXRUNTIME_ROOT="$PWD/build-onnxruntime/onnxruntime-osx-arm64-${ORT_VERSION}" &&
@@ -80,8 +87,11 @@ jobs:
           python3 bindings/python/build_wheel.py \
             --native-prefix sdk/pkg-unirt \
             --version "${GITHUB_REF_NAME#v}" \
-            --platform-tag macosx_14_0_arm64 \
+            --platform-tag "${MACOS_PLATFORM_TAG}" \
             --output-dir publish
+          # The tag names a minimum macOS; nothing else checks the binaries
+          # keep that promise, and the default deployment target does not.
+          python3 tools/ci/check_macos_deployment_target.py publish/*.whl
           python3 -m venv wheel-smoke
           wheel-smoke/bin/python -m pip install --no-deps publish/*.whl
           wheel-smoke/bin/python bindings/python/smoke_installed_wheel.py

@@ -98,3 +98,63 @@ def test_a_non_manylinux_claim_is_rejected_when_a_floor_exists():
 ])
 def test_glibc_floor_parsing(tag, expected):
     assert check_manylinux_tag.glibc_floor(tag) == expected
+
+
+check_macos_deployment_target = _load('check_macos_deployment_target')
+
+
+# Real `otool -l` output: the first from the v0.3.0 wheel built on a macOS 26
+# runner, the second from the same library built on a macOS 15 workstation.
+OTOOL_TOO_NEW = """
+Load command 9
+      cmd LC_BUILD_VERSION
+  cmdsize 32
+ platform 1
+    minos 26.4
+      sdk 26.5
+   ntools 1
+"""
+
+OTOOL_OK = """
+Load command 9
+      cmd LC_BUILD_VERSION
+  cmdsize 32
+ platform 1
+    minos 14.0
+      sdk 26.2
+"""
+
+OTOOL_LEGACY = """
+Load command 9
+      cmd LC_VERSION_MIN_MACOSX
+  cmdsize 16
+  version 10.13
+"""
+
+
+def test_reads_the_deployment_target():
+    assert check_macos_deployment_target.parse_minos(OTOOL_TOO_NEW) == (26, 4)
+    assert check_macos_deployment_target.parse_minos(OTOOL_OK) == (14, 0)
+
+
+def test_a_library_without_lc_build_version_is_not_a_failure():
+    assert check_macos_deployment_target.parse_minos(OTOOL_LEGACY) is None
+
+
+@pytest.mark.parametrize(('name', 'expected'), [
+    ('unirt-0.3.0-py3-none-macosx_14_0_arm64.whl', (14, 0)),
+    ('unirt-0.3.0-py3-none-macosx_26_4_arm64.whl', (26, 4)),
+])
+def test_reads_the_promised_version_from_the_wheel_name(name, expected):
+    assert check_macos_deployment_target.tag_version(name) == expected
+
+
+def test_a_non_macos_wheel_name_is_rejected():
+    with pytest.raises(ValueError):
+        check_macos_deployment_target.tag_version('unirt-0.3.0-py3-none-win_amd64.whl')
+
+
+def test_the_shipped_regression_is_caught():
+    """v0.3.0's macOS wheel: every dylib built for 26.4, tagged macosx_14_0."""
+    assert check_macos_deployment_target.parse_minos(OTOOL_TOO_NEW) > (14, 0)
+    assert check_macos_deployment_target.parse_minos(OTOOL_OK) <= (14, 0)
