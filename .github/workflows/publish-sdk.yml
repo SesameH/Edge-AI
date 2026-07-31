@@ -190,14 +190,61 @@ jobs:
           # auditwheel calls the wheel "consistent with" is the wrong question
           # here and the glibc floor is the right one.
           python tools/ci/check_manylinux_tag.py publish/*.whl "${{ matrix.platform_tag }}"
-          python -m venv wheel-smoke
-          wheel-smoke/bin/python -m pip install --no-deps publish/*.whl
-          wheel-smoke/bin/python bindings/python/smoke_installed_wheel.py
+          # No smoke test here: bundling ONNX Runtime puts the wheel's glibc
+          # floor at 2.31, above this image's 2.28, so pip in this container
+          # correctly refuses to install what was just built. smoke-linux runs
+          # it on glibc 2.31 exactly -- the floor the tag claims, which is a
+          # stricter place to test than any newer distro.
       - uses: actions/upload-artifact@v4
         with:
           name: publish-wheel-linux-${{ matrix.arch }}
           path: publish/*.whl
           retention-days: 7
+
+  smoke-linux:
+    name: Inference from the ${{ matrix.arch }} wheel (glibc 2.31)
+    needs: build-python-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    container:
+      # Debian 11 is glibc 2.31 on the nose: the oldest system the wheels claim
+      # to support, so a missing symbol shows up here rather than at a user's.
+      image: debian:11
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trust the workspace (container job)
+        run: git config --global --add safe.directory '*'
+      - uses: actions/download-artifact@v4
+        with:
+          name: publish-wheel-linux-${{ matrix.arch }}
+          path: wheel
+      - name: Install Python
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq python3 python3-venv python3-pip curl >/dev/null
+          python3 --version
+          ldd --version | head -1
+      - name: Fetch the test model
+        run: |
+          mkdir -p models
+          curl -fL -o models/SmolLM2-135M-Instruct-Q8_0.gguf "$GGUF_URL"
+      - name: Install the wheel and run inference
+        run: |
+          set -e
+          python3 -m venv smoke
+          smoke/bin/python -m pip install --quiet --upgrade pip
+          smoke/bin/python -m pip install --quiet wheel/*.whl
+          smoke/bin/unirt devices
+          smoke/bin/python bindings/python/smoke_inference_wheel.py \
+            models/SmolLM2-135M-Instruct-Q8_0.gguf
 
   build-python-windows:
     name: Python wheel (${{ matrix.platform_tag }})
@@ -321,7 +368,8 @@ jobs:
   publish:
     name: Sync wrapper source + release on unirt-sdk
     needs:
-      [build-macos-ios, build-python-linux, build-python-windows, build-android]
+      [build-macos-ios, build-python-linux, build-python-windows, build-android,
+       smoke-linux]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
