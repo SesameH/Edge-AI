@@ -216,7 +216,10 @@ jobs:
     container:
       # Debian 11 is glibc 2.31 on the nose: the oldest system the wheels claim
       # to support, so a missing symbol shows up here rather than at a user's.
-      image: debian:11
+      # The python: variant of it because bullseye's own python3 is 3.9, below
+      # this package's floor -- pip there fails with "requires a different
+      # Python" before it ever looks at the binaries.
+      image: python:3.12-slim-bullseye
     timeout-minutes: 30
     steps:
       # debian:11 ships no git, so checkout falls back to a REST tarball --
@@ -226,10 +229,10 @@ jobs:
         with:
           name: publish-wheel-linux-${{ matrix.arch }}
           path: wheel
-      - name: Install Python
+      - name: Show the environment under test
         run: |
           apt-get update -qq
-          apt-get install -y -qq python3 python3-venv python3-pip curl >/dev/null
+          apt-get install -y -qq curl >/dev/null
           python3 --version
           ldd --version | head -1
       - name: Fetch the test model
