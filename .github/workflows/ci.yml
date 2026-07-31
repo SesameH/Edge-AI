@@ -133,53 +133,6 @@ jobs:
       - name: Run tests
         run: python -m pytest tests/python -q
 
-  windows:
-    # The release wheels were cross-compiled and only ever checked for "the
-    # plugin loads"; nothing had run the behaviour suite on a real Windows
-    # machine. Path handling, UTF-8 console output and the DLL search order
-    # are exactly the things a cross-build cannot vouch for.
-    name: Windows x64 (llama_cpp)
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Fetch llama.cpp submodule
-        run: git submodule update --init --depth 1 third-party/llama.cpp
-      - name: MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
-      - name: Configure
-        run: >
-          cmake -S sdk -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
-      - name: Build
-        run: cmake --build build -j4
-      - name: Install
-        run: cmake --install build --prefix sdk/pkg-unirt
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Cache test model
-        id: model-cache
-        uses: actions/cache@v4
-        with:
-          path: models/SmolLM2-135M-Instruct-Q8_0.gguf
-          key: smollm2-135m-q8_0
-      - name: Download test model
-        if: steps.model-cache.outputs.cache-hit != 'true'
-        run: |
-          New-Item -ItemType Directory -Force -Path models | Out-Null
-          Invoke-WebRequest -Uri $env:GGUF_URL -OutFile models/SmolLM2-135M-Instruct-Q8_0.gguf
-      - name: Native tests
-        run: >
-          ctest --test-dir build --output-on-failure
-          -R "unirt-(static-registration|inference-smoke)"
-      - name: Install Python binding
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e bindings/python pytest
-      - name: Run tests
-        run: python -m pytest tests/python -q
-
   android:
     name: Android arm64-v8a (build)
     runs-on: ubuntu-latest
@@ -297,6 +250,10 @@ jobs:
         working-directory: bindings/ios
 
   windows:
+    # The release wheels are cross-compiled and only ever checked for "the
+    # plugin loads"; path handling, UTF-8 console output and the DLL search
+    # order are exactly what a cross-build cannot vouch for, so the behaviour
+    # suite runs on real Windows here — on both architectures.
     name: ${{ matrix.label }} (llama_cpp)
     strategy:
       fail-fast: false
