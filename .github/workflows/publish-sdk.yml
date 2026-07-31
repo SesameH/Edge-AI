@@ -219,9 +219,9 @@ jobs:
       image: debian:11
     timeout-minutes: 30
     steps:
+      # debian:11 ships no git, so checkout falls back to a REST tarball --
+      # which is all this needs: the smoke script, and no submodules.
       - uses: actions/checkout@v4
-      - name: Trust the workspace (container job)
-        run: git config --global --add safe.directory '*'
       - uses: actions/download-artifact@v4
         with:
           name: publish-wheel-linux-${{ matrix.arch }}
