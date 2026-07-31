@@ -5,6 +5,18 @@ target_compile_definitions(unirt_mlx PUBLIC UNIRT_SHARED)
 # MLX is built separately (see README): cmake -S third-party/mlx -B build-mlx ...
 # and installed into build-mlx/install. Override with -DUNIRT_MLX_PREFIX.
 set(UNIRT_MLX_PREFIX "${CMAKE_SOURCE_DIR}/../build-mlx/install" CACHE PATH "MLX install prefix")
+
+# Built against macOS SDK 26.2 or newer, MLX adds its JACCL backend (RDMA over
+# Thunderbolt) and puts jaccl::jaccl in the exported link interface -- but it
+# installs only jacclTargets.cmake, with no jacclConfig.cmake, so
+# find_package(jaccl) cannot resolve it and find_package(MLX) then fails with
+# "target was not found". Import the targets file directly when the install has
+# one; an MLX built on an older SDK simply has no such file.
+set(_unirt_jaccl_targets "${UNIRT_MLX_PREFIX}/lib/cmake/jaccl/jacclTargets.cmake")
+if(EXISTS "${_unirt_jaccl_targets}")
+    include("${_unirt_jaccl_targets}")
+endif()
+
 find_package(MLX CONFIG REQUIRED PATHS "${UNIRT_MLX_PREFIX}" NO_DEFAULT_PATH)
 
 target_include_directories(unirt_mlx PUBLIC ${COMMON_INCLUDE})

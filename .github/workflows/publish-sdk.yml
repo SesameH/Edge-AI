@@ -142,6 +142,12 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
+      - name: Trust the workspace (container job)
+        # Only the manylinux jobs run in a container, where the checkout's uid
+        # and the shell's uid differ and git refuses the repository outright:
+        # "fatal: detected dubious ownership". The workspace is created by the
+        # runner for this job, so trusting it adds nothing an attacker could use.
+        run: git config --global --add safe.directory '*'
       - name: Fetch llama.cpp submodule
         run: git submodule update --init --depth 1 third-party/llama.cpp
       - name: Select manylinux Python + install build tools
