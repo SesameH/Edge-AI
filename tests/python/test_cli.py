@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Peter Huang.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import json
+
 from unirt.cli import _build_parser, _collect_media_history
 
 
@@ -46,6 +48,37 @@ def test_rerank_cli_parses_a_query_and_documents():
     assert arguments.query == 'a question'
     assert arguments.documents == ['doc one', 'doc two']
     assert arguments.json is True
+
+
+def test_rerank_reports_each_documents_own_index(monkeypatch, capsys):
+    """Two identical documents must keep their own positions.
+
+    Recovering the index with documents.index(text) after sorting returns the
+    first equal string, so a duplicate reported the lower index twice and the
+    later position never appeared at all -- which silently points the caller's
+    lookup at the wrong row of its own corpus.
+    """
+    import unirt.cli as cli
+    from unirt.cli import _cmd_rerank
+
+    class _Fake:
+        def rerank(self, _query, documents):
+            return [0.1 * (index + 1) for index in range(len(documents))]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        cli.AutoModelForEmbedding, 'from_pretrained', staticmethod(lambda *a, **k: _Fake())
+    )
+    arguments = _build_parser().parse_args(
+        ['rerank', 'owner/reranker', 'q', 'same', 'other', 'same', '--json']
+    )
+    assert _cmd_rerank(arguments) == 0
+
+    ranked = json.loads(capsys.readouterr().out)
+    assert [entry['index'] for entry in ranked] == [2, 1, 0]
+    assert [entry['document'] for entry in ranked] == ['same', 'other', 'same']
 
 
 def test_serve_cli_forwards_its_options_to_the_server(monkeypatch):

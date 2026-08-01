@@ -82,6 +82,52 @@ class TestLlamaCpp:
         assert sdk.load_library().unirt_deinit() == -1010
 
 
+class TestBosVocabulary:
+    """The BOS path, which SmolLM2 (add_bos_token=false) cannot exercise.
+
+    Tokenizing the prompt with add_special keyed off "is the KV cache empty"
+    rather than off n_past made every turn but the first arrive without BOS.
+    On Gemma that emptied the reply outright, and because history_[0] was then
+    the cached BOS against a prompt starting at the first real token, the
+    prefix match failed at position 0 and re-prefilled the whole transcript
+    every turn. Both symptoms are invisible on a vocabulary that adds no BOS,
+    which is why the suite needs a model that does.
+    """
+
+    @pytest.fixture(scope='class')
+    def bos_model(self, sdk):
+        from unirt.auto import AutoModelForCausalLM
+
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path('gguf_bos'), device_map='llama_cpp'
+        )
+        yield model
+        model.close()
+
+    @staticmethod
+    def _ask(model):
+        return model._apply_chat_template(
+            [{'role': 'user', 'content': 'Name one color.'}], True, False, None
+        )
+
+    def test_repeating_a_prompt_repeats_the_answer(self, bos_model):
+        prompt = self._ask(bos_model)
+        first = bos_model.generate(prompt, max_new_tokens=8, temperature=0.0)
+        # Deliberately no reset: the second call must rebuild the identical
+        # token sequence, BOS included, and so produce the identical output.
+        second = bos_model.generate(prompt, max_new_tokens=8, temperature=0.0)
+        assert first.text
+        assert second.text == first.text
+        assert second.profile.prompt_tokens == first.profile.prompt_tokens
+
+    def test_a_cold_prompt_and_a_warm_one_tokenize_alike(self, bos_model):
+        prompt = self._ask(bos_model)
+        bos_model.reset()
+        cold = bos_model.generate(prompt, max_new_tokens=4, temperature=0.0)
+        warm = bos_model.generate(prompt, max_new_tokens=4, temperature=0.0)
+        assert warm.profile.prompt_tokens == cold.profile.prompt_tokens
+
+
 class TestMlx:
     def test_generate_capital(self, mlx_model):
         assert 'Paris' in ask_capital(mlx_model)

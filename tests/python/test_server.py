@@ -1037,6 +1037,37 @@ def test_api_key_rejects_anything_but_an_exact_bearer_match(header):
     assert status == 401
 
 
+def test_a_non_ascii_bearer_token_is_rejected_not_fatal():
+    """compare_digest raises TypeError on str holding non-ASCII rather than
+    returning False, so an unauthenticated caller could kill the request
+    thread at will by sending one byte over 0x7f."""
+    status, _, _ = _request(
+        _keyed_server('s3cret'), 'POST', '/v1/chat/completions',
+        headers={'Authorization': 'Bearer s3crét'}, payload=_CHAT,
+    )
+    assert status == 401
+
+
+def test_a_non_ascii_configured_key_rejects_instead_of_crashing():
+    """The same defect fired from the other side: a key the operator chose with
+    a non-ASCII character made compare_digest raise on every request, valid
+    attempt or not. main() refuses such a key up front, but the handler must
+    not depend on that."""
+    status, _, _ = _request(
+        _keyed_server('s3crét'), 'POST', '/v1/chat/completions',
+        headers={'Authorization': 'Bearer s3cret'}, payload=_CHAT,
+    )
+    assert status == 401
+
+
+def test_main_refuses_an_api_key_no_client_could_send():
+    """Authorization is carried as latin-1 and bearer tokens are ASCII by
+    spec, so a key outside ASCII is one nothing can ever authenticate with --
+    a server that starts anyway is simply unreachable."""
+    with pytest.raises(SystemExit):
+        server.main(['--model', 'unused', '--api-key', 'парол'])
+
+
 def test_health_stays_open_so_probes_do_not_need_the_key():
     """A container healthcheck should not have to carry the secret, and the
     reply discloses nothing beyond the fact that something is listening."""

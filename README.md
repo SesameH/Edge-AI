@@ -86,6 +86,12 @@ mkdir -p models/all-MiniLM-L6-v2-GGUF && cd models/all-MiniLM-L6-v2-GGUF && \
   for f in tokenizer.json tokenizer_config.json sentence_bert_config.json; do \
     curl -sLO "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/$f"; done && cd ../..
 
+# 5b2. optional but recommended: a model whose vocabulary sets add_bos_token.
+#     SmolLM2 does not, so it cannot catch anything that mishandles BOS -- and
+#     tests/python/test_smoke.py has a prefix-cache regression that needs one.
+mkdir -p models && curl -L -o models/gemma-3-270m-it-Q8_0.gguf \
+  "https://huggingface.co/ggml-org/gemma-3-270m-it-GGUF/resolve/main/gemma-3-270m-it-Q8_0.gguf"
+
 # 5c. optional: a GGUF reranker model (llama_cpp's LLAMA_POOLING_TYPE_RANK;
 #     no tokenizer.json needed — rerank() tokenizes natively via the GGUF's
 #     own vocab)

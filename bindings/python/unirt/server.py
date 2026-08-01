@@ -543,7 +543,14 @@ class Handler(BaseHTTPRequestHandler):
             return True
         header = self.headers.get('Authorization', '')
         scheme, _, token = header.partition(' ')
-        if scheme.lower() != 'bearer' or not hmac.compare_digest(token.strip(), expected):
+        # compare_digest refuses str arguments holding non-ASCII, so a key or a
+        # presented token with any such character raises TypeError instead of
+        # returning False -- an unauthenticated caller could take the request
+        # thread down that path at will. Comparing the UTF-8 bytes is defined
+        # for every input and still constant-time.
+        if scheme.lower() != 'bearer' or not hmac.compare_digest(
+            token.strip().encode('utf-8'), expected.encode('utf-8')
+        ):
             self._json(
                 401,
                 {'error': {
@@ -611,10 +618,18 @@ class Handler(BaseHTTPRequestHandler):
             # Not an OpenAI-standard endpoint: exposes runtime_stats() for
             # UIs/dashboards that want live device/memory info.
             served = next(
-                handle
-                for handle in (self.server.model, self.server.embedding, self.server.reranker)
-                if handle is not None
+                (
+                    handle
+                    for handle in (
+                        self.server.model, self.server.embedding, self.server.reranker
+                    )
+                    if handle is not None
+                ),
+                None,
             )
+            if served is None:
+                self._error(404, 'this server was started with no model to report on')
+                return
             self._json(200, served.runtime_stats())
         else:
             self._error(404, f'unknown path {self.path}')
@@ -1055,6 +1070,12 @@ def main(argv: list[str] | None = None) -> None:
     if args.max_queued_requests < 1:
         ap.error('--max-queued-requests must be >= 1')
     api_key = args.api_key or os.environ.get('UNIRT_API_KEY') or None
+    # Authorization travels as latin-1 and RFC 6750 bearer tokens are ASCII,
+    # so a key outside ASCII is one no client can present -- the server would
+    # start and then refuse everyone, which reads as a broken build rather
+    # than a bad flag.
+    if api_key is not None and not api_key.isascii():
+        ap.error('--api-key must be ASCII; HTTP cannot carry anything else in a bearer token')
     if not args.model and not args.embedding_model and not args.rerank_model:
         ap.error('at least one of --model, --embedding-model or --rerank-model is required')
 

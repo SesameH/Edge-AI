@@ -13,6 +13,10 @@ MODELS = {
     'gguf': os.path.join(REPO_ROOT, 'models', 'SmolLM2-135M-Instruct-Q8_0.gguf'),
     'safetensors': os.path.join(REPO_ROOT, 'models', 'SmolLM2-135M-Instruct'),
     'safetensors_8bit': os.path.join(REPO_ROOT, 'models', 'SmolLM2-135M-Instruct-8bit'),
+    # SmolLM2's vocabulary sets add_bos_token=false, so nothing in the rest of
+    # the suite exercises the BOS path at all -- a bug that dropped BOS from
+    # every turn after the first passed the whole suite. Gemma sets it true.
+    'gguf_bos': os.path.join(REPO_ROOT, 'models', 'gemma-3-270m-it-Q8_0.gguf'),
 }
 
 

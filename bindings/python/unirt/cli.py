@@ -446,15 +446,23 @@ def _cmd_rerank(arguments: argparse.Namespace) -> int:
         scores = model.rerank(arguments.query, arguments.documents)
     finally:
         model.close()
-    ranked = sorted(zip(scores, arguments.documents), key=lambda pair: pair[0], reverse=True)
+    # Rank by score but carry each document's original position along: looking
+    # the index up afterwards with list.index() returns the first equal string,
+    # so two identical documents both reported the lower index and the other
+    # one never appeared.
+    ranked = sorted(
+        ((score, index, text) for index, (score, text) in enumerate(zip(scores, arguments.documents))),
+        key=lambda entry: entry[0],
+        reverse=True,
+    )
     if arguments.json:
         print(json.dumps(
-            [{'index': arguments.documents.index(text), 'score': score, 'document': text}
-             for score, text in ranked],
+            [{'index': index, 'score': score, 'document': text}
+             for score, index, text in ranked],
             ensure_ascii=False,
         ))
         return 0
-    for score, text in ranked:
+    for score, _index, text in ranked:
         print(f'{score:9.4f}  {text}')
     return 0
 

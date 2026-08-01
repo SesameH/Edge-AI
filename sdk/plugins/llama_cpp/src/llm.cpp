@@ -564,7 +564,18 @@ int32_t LlamaCppLlm::generate(
     if (input->input_ids && input->input_ids_count > 0) {
         prompt.assign(input->input_ids, input->input_ids + input->input_ids_count);
     } else if (input->prompt_utf8) {
-        const int32_t tokenize_result = tokenize(input->prompt_utf8, history_.empty(), prompt);
+        // BOS belongs to the sequence, not to the call, so the decision is
+        // n_past's and not history_'s. With n_past == 0 the prompt is the whole
+        // prompt -- a chat client resends the entire transcript -- so it starts
+        // at BOS every time; keying this off "is the cache empty" instead
+        // dropped BOS from turn two onwards on every add_bos model (Gemma,
+        // Llama, Mistral). That is wrong twice over: the model loses a token it
+        // was trained to always see, and because history_[0] is then the cached
+        // BOS while prompt[0] is the first real token, the prefix match fails
+        // at position 0 and the whole transcript is re-prefilled each turn.
+        // n_past > 0 is an explicit continuation from a caller managing its own
+        // positions, and mid-sequence is exactly where BOS must not appear.
+        const int32_t tokenize_result = tokenize(input->prompt_utf8, requested_past == 0, prompt);
         if (tokenize_result != UNIRT_SUCCESS) return tokenize_result;
     } else {
         return UNIRT_ERROR_COMMON_INVALID_INPUT;
