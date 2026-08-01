@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -184,6 +185,7 @@ class MlxLlm : public LlmBackend {
 
         int32_t max_tokens = 512;
         int32_t requested_past = 0;
+        int32_t logprob_alternatives = 0;
         std::vector<std::string> stops;
         const unirt_SamplerConfig* sampler_config = nullptr;
         if (input->config) {
@@ -194,6 +196,8 @@ class MlxLlm : public LlmBackend {
             if (input->config->max_tokens > 0) max_tokens = input->config->max_tokens;
             requested_past = input->config->n_past;
             sampler_config = input->config->sampler_config;
+            if (input->config->logprobs < 0) return UNIRT_ERROR_COMMON_INVALID_INPUT;
+            logprob_alternatives = input->config->logprobs;
             if (input->config->sliding_window) {
                 return UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED;
             }
@@ -298,9 +302,17 @@ class MlxLlm : public LlmBackend {
         StopStreamState stream_state(std::move(stops));
         const char* stop_reason = "length";
 
+        const bool want_logprobs = input->on_logprob != nullptr && logprob_alternatives > 0;
+
         const int64_t t_start = now_us();
         auto          logits  = model_.forward_logits(fresh_ids);
         transcript_.insert(transcript_.end(), fresh_ids.begin(), fresh_ids.end());
+        // Snapshot before constrain_logits(), which masks refused tokens to
+        // -inf in place: reporting those would say the model ruled them out
+        // when it was the grammar. llama_cpp reports pre-grammar scores for
+        // the same reason, and the two backends have to agree.
+        std::vector<float> raw_logits;
+        if (want_logprobs) raw_logits = logits;
         bool exhausted = constraint && !constrain_logits(logits, *constraint, eos);
         int32_t       next    = exhausted ? eos : sampler.sample(logits);
         const int64_t t_first = now_us();
@@ -323,6 +335,15 @@ class MlxLlm : public LlmBackend {
                 }
                 break;
             }
+            if (want_logprobs &&
+                !report_logprobs(
+                    raw_logits, next, logprob_alternatives, input->on_logprob,
+                    input->user_data)) {
+                stream_state.discard_unemitted();
+                stop_reason = "user";
+                break;
+            }
+
             std::string piece = tokenizer_.decode_piece(next);
             if (constraint && !constraint->accept(piece)) {
                 // Unreachable unless masking and the automaton disagree.
@@ -356,6 +377,7 @@ class MlxLlm : public LlmBackend {
                 }
                 break;
             }
+            if (want_logprobs) raw_logits = logits;
             exhausted = constraint && !constrain_logits(logits, *constraint, eos);
             next      = exhausted ? eos : sampler.sample(logits);
         }
@@ -443,6 +465,56 @@ class MlxLlm : public LlmBackend {
     // Sets every token the schema forbids to -inf. Returns false when nothing
     // at all may follow, which can only happen if the schema admits no
     // continuation the tokenizer can spell.
+    /** Report one step's log-probabilities. False = the caller asked us to stop.
+     *
+     *  `logits` must be the model's own scores, taken before any constraint
+     *  masked them; see the snapshot in generate() for why.
+     */
+    bool report_logprobs(
+        const std::vector<float>& logits, int32_t sampled, int32_t alternatives,
+        unirt_logprob_callback callback, void* user_data) {
+        if (logits.empty()) return true;
+
+        // Subtracting the max before exp() is what keeps this finite on the
+        // large logits quantized models produce.
+        const float max_logit = *std::max_element(logits.begin(), logits.end());
+        double      sum       = 0.0;
+        for (float value : logits) sum += std::exp(static_cast<double>(value) - max_logit);
+        const double log_normalizer = std::log(sum) + max_logit;
+
+        const size_t wanted = std::min<size_t>(static_cast<size_t>(alternatives), logits.size());
+        std::vector<int32_t> ranked(logits.size());
+        std::iota(ranked.begin(), ranked.end(), 0);
+        std::partial_sort(
+            ranked.begin(), ranked.begin() + static_cast<ptrdiff_t>(wanted), ranked.end(),
+            [&logits](int32_t a, int32_t b) {
+                return logits[static_cast<size_t>(a)] > logits[static_cast<size_t>(b)];
+            });
+
+        std::vector<std::string>   pieces;
+        std::vector<unirt_Logprob> entries;
+        pieces.reserve(wanted + 1);
+        entries.reserve(wanted + 1);
+        auto append = [&](int32_t token) {
+            pieces.push_back(tokenizer_.decode_piece(token));
+            unirt_Logprob entry{};
+            entry.token_id = token;
+            entry.logprob  = static_cast<float>(
+                static_cast<double>(logits[static_cast<size_t>(token)]) - log_normalizer);
+            entries.push_back(entry);
+        };
+        // Sampled token first, whether or not it was the most likely one.
+        append(sampled);
+        for (size_t index = 0; index < wanted; ++index) {
+            if (ranked[index] != sampled) append(ranked[index]);
+        }
+        // Only safe once `pieces` has finished growing.
+        for (size_t index = 0; index < entries.size(); ++index) {
+            entries[index].piece = pieces[index].c_str();
+        }
+        return callback(entries.data(), static_cast<int32_t>(entries.size()), user_data);
+    }
+
     bool constrain_logits(std::vector<float>& logits, JsonConstraint& constraint, int32_t eos) {
         build_vocabulary_cache();
         // Testing 49k tokens against the automaton costs about as much as the

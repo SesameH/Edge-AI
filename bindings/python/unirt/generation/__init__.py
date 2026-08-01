@@ -4,7 +4,14 @@
 """Public generation configuration, output, and streaming helpers."""
 
 from .config import GenerationConfig
-from .output import GenerateOutput, GenerationProfile
+from .output import GenerateOutput, GenerationProfile, Logprob, TokenLogprobs
 from .streamer import TextIteratorStreamer
 
-__all__ = ['GenerationConfig', 'GenerateOutput', 'GenerationProfile', 'TextIteratorStreamer']
+__all__ = [
+    'GenerationConfig',
+    'GenerateOutput',
+    'GenerationProfile',
+    'Logprob',
+    'TextIteratorStreamer',
+    'TokenLogprobs',
+]

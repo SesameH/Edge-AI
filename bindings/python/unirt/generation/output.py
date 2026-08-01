@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 
@@ -72,6 +73,33 @@ class GenerationProfile:
         return f'GenerationProfile({", ".join(values)})'
 
 
+@dataclass(frozen=True)
+class Logprob:
+    """One token and the model's log-probability for it.
+
+    ``token`` is the token's own bytes decoded as UTF-8, which for a token that
+    carries only part of a character comes back with replacement characters --
+    a token is not a character, and an alternative that was never sampled has
+    no neighbours to be rejoined with.
+    """
+
+    token: str
+    token_id: int
+    logprob: float
+
+    @property
+    def probability(self) -> float:
+        return math.exp(self.logprob)
+
+
+@dataclass(frozen=True)
+class TokenLogprobs:
+    """One decoding step: the token taken, and what else was likely."""
+
+    chosen: Logprob
+    top: tuple[Logprob, ...] = ()
+
+
 @dataclass
 class GenerateOutput:
     """Visible response text, optional reasoning block, and profile data."""
@@ -79,14 +107,27 @@ class GenerateOutput:
     text: str = ''
     thinking: str | None = None
     profile: GenerationProfile = field(default_factory=GenerationProfile)
+    # Populated only when generate(logprobs=N) asked for them; one entry per
+    # generated token, in order.
+    logprobs: tuple[TokenLogprobs, ...] | None = None
 
     @classmethod
-    def from_raw(cls, full_text: str, profile: GenerationProfile) -> 'GenerateOutput':
+    def from_raw(
+        cls,
+        full_text: str,
+        profile: GenerationProfile,
+        logprobs: tuple[TokenLogprobs, ...] | None = None,
+    ) -> 'GenerateOutput':
         match = _THINK_BLOCK.search(full_text)
         if match is None:
-            return cls(text=full_text, profile=profile)
+            return cls(text=full_text, profile=profile, logprobs=logprobs)
         visible = _THINK_BLOCK.sub('', full_text).strip()
-        return cls(text=visible, thinking=match.group(1).strip(), profile=profile)
+        return cls(
+            text=visible,
+            thinking=match.group(1).strip(),
+            profile=profile,
+            logprobs=logprobs,
+        )
 
 
-__all__ = ['GenerateOutput', 'GenerationProfile']
+__all__ = ['GenerateOutput', 'GenerationProfile', 'Logprob', 'TokenLogprobs']

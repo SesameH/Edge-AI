@@ -25,6 +25,17 @@ from ctypes import (
 unirt_token_callback = CFUNCTYPE(c_bool, c_char_p, c_void_p)
 
 
+class unirt_Logprob(Structure):
+    _fields_ = [
+        ('piece', c_char_p),
+        ('token_id', c_int32),
+        ('logprob', c_float),
+    ]
+
+
+unirt_logprob_callback = CFUNCTYPE(c_bool, POINTER(unirt_Logprob), c_int32, c_void_p)
+
+
 class unirt_GetPluginListOutput(Structure):
     _fields_ = [
         ('plugin_ids', POINTER(c_char_p)),
@@ -106,6 +117,7 @@ class unirt_GenerationConfig(Structure):
         ('audio_count', c_int32),
         ('sliding_window', c_bool),
         ('sliding_window_n_keep', c_int32),
+        ('logprobs', c_int32),
     ]
 
 
@@ -179,6 +191,7 @@ class unirt_LlmGenerateInput(Structure):
         ('user_data', c_void_p),
         ('input_ids', POINTER(c_int32)),
         ('input_ids_count', c_int32),
+        ('on_logprob', unirt_logprob_callback),
     ]
 
 

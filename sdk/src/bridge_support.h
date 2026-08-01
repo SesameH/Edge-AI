@@ -17,6 +17,7 @@
  */
 
 #include <memory>
+#include <type_traits>
 #include <utility>
 
 #include "unirt.h"
@@ -157,20 +158,54 @@ int32_t close_backend(
     });
 }
 
+/** Everything the bridge splices in front of a plugin for one run.
+ *
+ *  A generate input has a single `user_data` slot shared by every callback, so
+ *  the moment the bridge needs it for its own UTF-8 rejoiner the caller's
+ *  pointer has nowhere left to live. This holds both, and the trampolines
+ *  below unpack it. */
+struct GenerationRelay {
+    StreamJoiner           joiner;
+    unirt_logprob_callback on_logprob;
+    void*                  user_data;
+};
+
+inline bool relay_token(const char* piece, void* user_data) {
+    auto* relay = static_cast<GenerationRelay*>(user_data);
+    return StreamJoiner::trampoline()(piece, &relay->joiner);
+}
+
+inline bool relay_logprob(const unirt_Logprob* entries, int32_t count, void* user_data) {
+    // Straight through: these are per-token vocabulary entries, not a byte
+    // stream, so there is nothing for the joiner to reassemble.
+    auto* relay = static_cast<GenerationRelay*>(user_data);
+    return relay->on_logprob(entries, count, relay->user_data);
+}
+
 /** Forward a generate call, splicing a UTF-8 reassembly stage between the
  *  plugin's raw byte pieces and the caller's callback, and deriving the
  *  speed figures afterwards. Works for both modalities because their
- *  generate inputs share the on_token/user_data field shape. */
+ *  generate inputs share the on_token/user_data field shape; the logprob
+ *  callback exists on the LLM input only. */
 template <typename Interface, typename GenInput, typename GenOutput>
 int32_t run_generation(Interface& backend, const GenInput* input, GenOutput* output) {
+    constexpr bool has_logprobs = std::is_same_v<GenInput, unirt_LlmGenerateInput>;
+    bool wants_logprobs = false;
+    if constexpr (has_logprobs) wants_logprobs = input->on_logprob != nullptr;
+
     int32_t rc;
-    if (input->on_token) {
-        StreamJoiner joiner(input->on_token, input->user_data);
-        GenInput     spliced = *input;
-        spliced.on_token     = StreamJoiner::trampoline();
-        spliced.user_data    = &joiner;
+    if (input->on_token || wants_logprobs) {
+        GenerationRelay relay{
+            StreamJoiner(input->on_token, input->user_data), nullptr, input->user_data};
+        GenInput spliced  = *input;
+        spliced.user_data = &relay;
+        spliced.on_token  = input->on_token ? relay_token : nullptr;
+        if constexpr (has_logprobs) {
+            relay.on_logprob   = input->on_logprob;
+            spliced.on_logprob = input->on_logprob ? relay_logprob : nullptr;
+        }
         rc = backend.generate(&spliced, output);
-        if (rc == UNIRT_SUCCESS) joiner.finish();
+        if (rc == UNIRT_SUCCESS && input->on_token) relay.joiner.finish();
     } else {
         rc = backend.generate(input, output);
     }

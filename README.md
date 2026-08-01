@@ -234,9 +234,19 @@ client and anything else that speaks the OpenAI API
 verbatim, with no chat template applied. That is what makes it useful next to
 the chat endpoint — base models have no template to apply, and some clients
 only ever learned this endpoint. It takes a string or an array of strings
-(each becomes its own choice), `echo`, and streaming. `n`, `best_of`, `suffix`
-and `logprobs` are refused rather than silently ignored, since a reply that
-quietly means something else is worse than an error.
+(each becomes its own choice), `echo`, and streaming. `n`, `best_of` and
+`suffix` are refused rather than silently ignored, since a reply that quietly
+means something else is worse than an error.
+
+Both endpoints report log-probabilities: `logprobs: true` with an optional
+`top_logprobs: N` on chat, `logprobs: N` on `/v1/completions` (the two carry
+different response shapes, and each endpoint emits its own). They stream too,
+each chunk carrying the tokens behind it. The numbers are the model's own
+log-softmax over the whole vocabulary, taken **before** any sampler or grammar
+touches the distribution — so they do not move when temperature, `top_p` or a
+JSON schema does, which is what makes them usable as a confidence signal.
+Asking for them costs a softmax over the vocabulary per token; leaving them
+off skips that entirely.
 
 `--embedding-model` loads a text encoder for `/v1/embeddings`, alongside the
 chat model or on its own:

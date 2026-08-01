@@ -22,7 +22,13 @@ from .auto import (
     load,
     resolve_device_map,
 )
-from .generation import GenerateOutput, GenerationProfile, TextIteratorStreamer
+from .generation import (
+    GenerateOutput,
+    GenerationProfile,
+    Logprob,
+    TextIteratorStreamer,
+    TokenLogprobs,
+)
 from .modeling import UniRTEmbedding, UniRTLLM, UniRTVLM
 
 __all__ = [
@@ -32,7 +38,9 @@ __all__ = [
     'AutoModelForVision2Seq',
     'GenerateOutput',
     'GenerationProfile',
+    'Logprob',
     'TextIteratorStreamer',
+    'TokenLogprobs',
     'UniRTError',
     'UniRTEmbedding',
     'UniRTLLM',

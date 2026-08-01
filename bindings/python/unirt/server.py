@@ -60,6 +60,10 @@ _MAX_RERANK_DOCUMENTS = 512
 # /v1/completions takes an array of prompts, and each one is a full generation
 # run held on a single serialized model.
 _MAX_COMPLETION_PROMPTS = 16
+# Alternatives reported per token. Each one is a token piece plus its bytes in
+# the response, so a large value inflates the reply far more than the request;
+# OpenAI caps top_logprobs at 20 and there is no reason to be looser.
+_MAX_TOP_LOGPROBS = 20
 
 
 def _completion_id(prefix: str = 'chatcmpl') -> str:
@@ -329,6 +333,109 @@ def _parse_generation_args(req: dict) -> dict:
     return result
 
 
+def _parse_logprobs_request(req: dict, *, chat: bool) -> int:
+    """How many alternatives to report per token, in the shape each endpoint uses.
+
+    Chat spells it `logprobs: true` plus an optional `top_logprobs: N`; the
+    older completions endpoint spells it `logprobs: N` directly. Both land on
+    the same native request, so they are parsed into the same number.
+    """
+
+    if chat:
+        wanted = req.get('logprobs', False)
+        if not isinstance(wanted, bool):
+            raise ValueError('logprobs must be a boolean on /v1/chat/completions')
+        top = req.get('top_logprobs')
+        if top is None:
+            return 1 if wanted else 0
+        if not wanted:
+            raise ValueError('top_logprobs requires logprobs to be true')
+        if not isinstance(top, int) or isinstance(top, bool) or not 0 <= top <= _MAX_TOP_LOGPROBS:
+            raise ValueError(f'top_logprobs must be an integer between 0 and {_MAX_TOP_LOGPROBS}')
+        # The native side always reports the sampled token; top_logprobs counts
+        # the alternatives beside it, and 0 of those still means "report it".
+        return max(top, 1)
+
+    wanted = req.get('logprobs')
+    if wanted is None:
+        return 0
+    if not isinstance(wanted, int) or isinstance(wanted, bool) or not 0 <= wanted <= _MAX_TOP_LOGPROBS:
+        raise ValueError(f'logprobs must be an integer between 0 and {_MAX_TOP_LOGPROBS}')
+    return max(wanted, 1)
+
+
+def _logprob_entry(value) -> dict:
+    return {
+        'token': value.token,
+        'logprob': value.logprob,
+        # OpenAI sends the raw bytes so a client can rebuild a character that
+        # one token only carries part of; `token` alone cannot express that.
+        'bytes': list(value.token.encode('utf-8')),
+    }
+
+
+def _pending_steps(streamer, already_reported: int):
+    """The logprob steps behind the chunk just yielded, or None if unasked.
+
+    A chunk is not a token: the bridge holds a piece back until the bytes that
+    finish its character arrive, so one chunk can cover several tokens. Slicing
+    by how many entries existed at the previous chunk is what keeps every token
+    attached to the text it actually produced.
+    """
+
+    steps = getattr(streamer, 'logprobs', None)
+    if steps is None:
+        return None
+    return steps[already_reported:]
+
+
+def _pending_logprobs(streamer, already_reported: int):
+    """Chat-shaped logprobs for the chunk just yielded."""
+    steps = _pending_steps(streamer, already_reported)
+    return _logprob_payload(steps) if steps else None
+
+
+def _logprob_payload(steps) -> dict:
+    """The chat endpoint's `logprobs` object: one entry per token, in order."""
+    return {
+        'content': [
+            {
+                **_logprob_entry(step.chosen),
+                'top_logprobs': [_logprob_entry(alternative) for alternative in step.top],
+            }
+            for step in steps
+        ]
+    }
+
+
+def _legacy_logprob_payload(steps, base_offset: int) -> dict:
+    """The `logprobs` object /v1/completions uses, which is not the chat one.
+
+    The older endpoint predates the per-token object list: it carries four
+    parallel arrays instead, and `top_logprobs` is a token->logprob mapping per
+    position rather than a list. Clients built on the official schema reject
+    the chat shape here outright, so the two cannot be shared.
+    """
+
+    tokens = [step.chosen.token for step in steps]
+    offsets = []
+    cursor = base_offset
+    for token in tokens:
+        offsets.append(cursor)
+        cursor += len(token)
+    return {
+        'tokens': tokens,
+        'token_logprobs': [step.chosen.logprob for step in steps],
+        # A mapping loses duplicate token strings within one position; that is
+        # the format's own limitation, not something to work around here.
+        'top_logprobs': [
+            {alternative.token: alternative.logprob for alternative in step.top}
+            for step in steps
+        ],
+        'text_offset': offsets,
+    }
+
+
 def _parse_completion_request(req: dict) -> tuple[list[str], bool]:
     """Validate a legacy /v1/completions body. Returns (prompts, echo).
 
@@ -370,9 +477,6 @@ def _parse_completion_request(req: dict) -> tuple[list[str], bool]:
             raise ValueError(f'{name} must be 1; this server generates one completion per prompt')
     if req.get('suffix') is not None:
         raise ValueError('suffix (fill-in-the-middle) is not supported')
-    if req.get('logprobs') is not None:
-        raise ValueError('logprobs are not supported by this server')
-
     echo = req.get('echo', False)
     if not isinstance(echo, bool):
         raise ValueError('echo must be a boolean')
@@ -715,6 +819,7 @@ class Handler(BaseHTTPRequestHandler):
             gen_kwargs = _parse_generation_args(req)
             if not isinstance(req.get('stream', False), bool):
                 raise ValueError('stream must be a boolean')
+            gen_kwargs['logprobs'] = _parse_logprobs_request(req, chat=True)
             plan = parse_tool_request(req)
             messages = req.get('messages')
             # Prior calls and results are flattened whether or not this turn
@@ -804,6 +909,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(stream, bool):
                 raise ValueError('stream must be a boolean')
             prompts, echo = _parse_completion_request(req)
+            gen_kwargs['logprobs'] = _parse_logprobs_request(req, chat=False)
         except ValueError as exc:
             self._error(400, str(exc))
             return
@@ -845,7 +951,12 @@ class Handler(BaseHTTPRequestHandler):
             choices.append({
                 'index': index,
                 'text': (prompt + out.text) if echo else out.text,
-                'logprobs': None,
+                # text_offset counts from the start of this choice's text, so
+                # echoing the prompt shifts every token along by its length.
+                'logprobs': (
+                    _legacy_logprob_payload(out.logprobs, len(prompt) if echo else 0)
+                    if out.logprobs else None
+                ),
                 'finish_reason': (
                     'stop' if profile.stop_reason in ('eos', 'stop_sequence') else 'length'
                 ),
@@ -870,12 +981,12 @@ class Handler(BaseHTTPRequestHandler):
         cid = _completion_id('cmpl')
         created = int(time.time())
 
-        def chunk(index: int, text: str, finish=None) -> dict:
+        def chunk(index: int, text: str, finish=None, logprobs=None) -> dict:
             return {
                 'id': cid, 'object': 'text_completion', 'created': created,
                 'model': self.server.model_id,
                 'choices': [{
-                    'index': index, 'text': text, 'logprobs': None,
+                    'index': index, 'text': text, 'logprobs': logprobs,
                     'finish_reason': finish,
                 }],
             }
@@ -886,9 +997,20 @@ class Handler(BaseHTTPRequestHandler):
             if echo:
                 self._send_event(chunk(index, prompt))
             streamer = self.server.model.generate(prompt, stream=True, **gen_kwargs)
+            reported = 0
+            offset = len(prompt) if echo else 0
             try:
                 for piece in streamer:
-                    self._send_event(chunk(index, piece))
+                    steps = _pending_steps(streamer, reported)
+                    self._send_event(chunk(
+                        index, piece,
+                        logprobs=(
+                            _legacy_logprob_payload(steps, offset) if steps else None
+                        ),
+                    ))
+                    if steps is not None:
+                        reported += len(steps)
+                    offset += len(piece)
             except (BrokenPipeError, ConnectionResetError):
                 self._drain_cancelled(streamer)
                 raise
@@ -1030,6 +1152,7 @@ class Handler(BaseHTTPRequestHandler):
             'choices': [{
                 'index': 0,
                 'message': message,
+                'logprobs': _logprob_payload(out.logprobs) if out.logprobs else None,
                 'finish_reason': finish,
             }],
             'usage': {
@@ -1080,11 +1203,14 @@ class Handler(BaseHTTPRequestHandler):
         created = int(time.time())
         send_chunk = self._send_event
 
-        def delta(d: dict, finish=None) -> dict:
+        def delta(d: dict, finish=None, logprobs=None) -> dict:
+            choice: dict = {'index': 0, 'delta': d, 'finish_reason': finish}
+            if logprobs is not None:
+                choice['logprobs'] = logprobs
             return {
                 'id': cid, 'object': 'chat.completion.chunk', 'created': created,
                 'model': self.server.model_id,
-                'choices': [{'index': 0, 'delta': d, 'finish_reason': finish}],
+                'choices': [choice],
             }
 
         send_chunk(delta({'role': 'assistant', 'content': ''}))
@@ -1093,12 +1219,18 @@ class Handler(BaseHTTPRequestHandler):
         # anything a client can render, so those pieces are accumulated and
         # emitted once as a finished delta. Plain turns still stream live.
         buffered: list[str] = []
+        reported = 0
         try:
             for piece in streamer:
                 if plan is None:
-                    send_chunk(delta({'content': piece}))
+                    send_chunk(delta(
+                        {'content': piece},
+                        logprobs=_pending_logprobs(streamer, reported),
+                    ))
                 else:
                     buffered.append(piece)
+                if streamer.logprobs is not None:
+                    reported = len(streamer.logprobs)
         except (BrokenPipeError, ConnectionResetError):
             self._drain_cancelled(streamer)
             raise

@@ -28,6 +28,12 @@ class TextIteratorStreamer:
         self._cancel_event = threading.Event()
         self._cb_ref: unirt_token_callback | None = None
         self._decoder_finalizer: Callable[[], str] | None = None
+        # Set by the model when generate(logprobs=N) asked for them: the live
+        # list the collector appends to, one entry per generated token. It
+        # grows behind the chunks, so after consuming a chunk the entries added
+        # since the previous one are the tokens that chunk was made of -- a
+        # chunk is not a token, and a multi-byte character can span several.
+        self.logprobs: list | None = None
 
     @property
     def output(self) -> GenerateOutput | None:

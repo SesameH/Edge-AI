@@ -60,9 +60,10 @@ from ._ffi._types import (
     unirt_VlmGenerateInput,
     unirt_VlmGenerateOutput,
     unirt_VlmRuntimeStats,
+    unirt_logprob_callback,
     unirt_token_callback,
 )
-from .generation.output import GenerateOutput, GenerationProfile
+from .generation.output import GenerateOutput, GenerationProfile, Logprob, TokenLogprobs
 from .generation.streamer import TextIteratorStreamer
 from .tokenizer import ChatTokenizer
 
@@ -192,6 +193,41 @@ def _build_gen_config(
     return config, stop_values, image_values, audio_values
 
 
+class _LogprobCollector:
+    """Turns the native per-token logprob callback into Python objects.
+
+    Appends to ``steps`` as generation proceeds, so a streaming caller can read
+    the entries for the tokens behind each text chunk while the run is still
+    going, and a blocking caller just takes the finished list.
+
+    The ctypes callback object is held here on purpose: ctypes keeps no
+    reference to it, and if it were collected mid-run the plugin would call
+    into freed memory.
+    """
+
+    def __init__(self) -> None:
+        self.steps: list[TokenLogprobs] = []
+        self.callback = unirt_logprob_callback(self._on_logprob)
+
+    def _on_logprob(self, entries, count, _user_data) -> bool:
+        if not entries or count <= 0:
+            return True
+        decoded = [
+            Logprob(
+                # A token is not a character: one that carries part of a
+                # multi-byte sequence cannot decode cleanly, and an
+                # alternative that was never sampled has no neighbours to be
+                # rejoined with. Replacement characters are the honest answer.
+                token=(entries[index].piece or b'').decode('utf-8', errors='replace'),
+                token_id=int(entries[index].token_id),
+                logprob=float(entries[index].logprob),
+            )
+            for index in range(count)
+        ]
+        self.steps.append(TokenLogprobs(chosen=decoded[0], top=tuple(decoded[1:])))
+        return True
+
+
 def _validate_common_generate_args(
     prompt: str,
     max_new_tokens: int,
@@ -304,7 +340,9 @@ class _NativeModel:
         body = ',\n'.join(entries)
         return f'{name}(\n{body},\n)'
 
-    def _generate_locked(self, prompt: str, config, callback) -> GenerateOutput:
+    def _generate_locked(
+        self, prompt: str, config, callback, collector=None
+    ) -> GenerateOutput:
         library = load_library()
         input_value = self._GenerateInput(
             prompt_utf8=prompt.encode('utf-8'),
@@ -312,6 +350,9 @@ class _NativeModel:
             on_token=callback,
             user_data=None,
         )
+        if collector is not None:
+            # VLM inputs have no logprob field; only the LLM path asks for one.
+            input_value.on_logprob = collector.callback
         output = self._GenerateOutput()
         status = self._native('generate')(
             self._handle,
@@ -329,28 +370,35 @@ class _NativeModel:
             profile.stop_reason = 'context_length'
         else:
             _check(status)
-        return GenerateOutput.from_raw(text, profile)
+        steps = tuple(collector.steps) if collector is not None else None
+        return GenerateOutput.from_raw(text, profile, steps)
 
-    def _generate_blocking(self, prompt: str, config, *keepalive) -> GenerateOutput:
+    def _generate_blocking(
+        self, prompt: str, config, *keepalive, collector=None
+    ) -> GenerateOutput:
         @unirt_token_callback
         def ignore_token(_token, _user_data):
             return True
 
         with self._op_lock:
             self._require_open()
-            result = self._generate_locked(prompt, config, ignore_token)
+            result = self._generate_locked(prompt, config, ignore_token, collector)
         return result
 
-    def _generate_stream(self, prompt: str, config, *keepalive) -> TextIteratorStreamer:
+    def _generate_stream(
+        self, prompt: str, config, *keepalive, collector=None
+    ) -> TextIteratorStreamer:
         streamer = TextIteratorStreamer()
         callback = streamer._make_callback()
+        if collector is not None:
+            streamer.logprobs = collector.steps
 
         def run() -> GenerateOutput:
             pinned = (config, *keepalive)
             try:
                 with self._op_lock:
                     self._require_open()
-                    return self._generate_locked(prompt, config, callback)
+                    return self._generate_locked(prompt, config, callback, collector)
             finally:
                 del pinned
 
@@ -364,9 +412,10 @@ class _NativeModel:
         sampler: unirt_SamplerConfig,
         arrays: list[object],
         stream: bool,
+        collector=None,
     ) -> GenerateOutput | TextIteratorStreamer:
         runner = self._generate_stream if stream else self._generate_blocking
-        return runner(prompt, config, sampler, *arrays)
+        return runner(prompt, config, sampler, *arrays, collector=collector)
 
     def reset(self) -> None:
         with self._op_lock:
@@ -475,9 +524,14 @@ class UniRTLLM(_NativeModel):
         sliding_window: bool = False,
         sliding_window_n_keep: int = 0,
         n_past: int = 0,
+        logprobs: int = 0,
         **kwargs,
     ) -> GenerateOutput | TextIteratorStreamer:
         self._require_open()
+        if not isinstance(logprobs, int) or isinstance(logprobs, bool):
+            raise TypeError('logprobs must be an integer')
+        if not 0 <= logprobs <= _INT32_MAX:
+            raise ValueError('logprobs must be between 0 and the native int32 maximum')
         stops = _validate_common_generate_args(
             prompt,
             max_new_tokens,
@@ -511,7 +565,13 @@ class UniRTLLM(_NativeModel):
             sliding_window_n_keep,
             n_past,
         )
-        return self._dispatch_generation(prompt, config, sampler, arrays, stream)
+        config.logprobs = logprobs
+        # No collector means no callback, and the plugin then skips the
+        # per-token softmax over the whole vocabulary entirely.
+        collector = _LogprobCollector() if logprobs > 0 else None
+        return self._dispatch_generation(
+            prompt, config, sampler, arrays, stream, collector
+        )
 
     def runtime_stats(self) -> dict:
         output = unirt_LlmRuntimeStats()

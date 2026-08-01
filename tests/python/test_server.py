@@ -38,7 +38,7 @@ class FakeModel:
         profile = SimpleNamespace(
             stop_reason='eos', prompt_tokens=2, generated_tokens=1
         )
-        return SimpleNamespace(text='ok', profile=profile)
+        return SimpleNamespace(text='ok', profile=profile, logprobs=None)
 
     def runtime_stats(self):
         return {
@@ -309,9 +309,12 @@ TOOL_CALL_JSON = '{"name": "get_weather", "arguments": {"location": "Taipei"}}'
 class FakeStreamer:
     """Emits the constrained output in pieces, like the real streamer."""
 
-    def __init__(self, text: str, output):
+    def __init__(self, text: str, output, logprobs=None):
         self._pieces = [text[i:i + 8] for i in range(0, len(text), 8)]
         self.output = output
+        # The real streamer exposes the live list only when logprobs were
+        # asked for, and None otherwise.
+        self.logprobs = logprobs
 
     def __iter__(self):
         return iter(self._pieces)
@@ -325,7 +328,7 @@ class FakeToolModel(FakeModel):
 
     def generate(self, _prompt, *, stream: bool = False, **_kwargs):
         profile = SimpleNamespace(stop_reason='eos', prompt_tokens=2, generated_tokens=9)
-        out = SimpleNamespace(text=TOOL_CALL_JSON, profile=profile)
+        out = SimpleNamespace(text=TOOL_CALL_JSON, profile=profile, logprobs=None)
         return FakeStreamer(TOOL_CALL_JSON, out) if stream else out
 
 
@@ -1097,7 +1100,7 @@ class EchoModel(FakeModel):
         self.prompts.append(prompt)
         text = f'<{prompt}>'
         profile = SimpleNamespace(stop_reason='eos', prompt_tokens=3, generated_tokens=2)
-        out = SimpleNamespace(text=text, profile=profile)
+        out = SimpleNamespace(text=text, profile=profile, logprobs=None)
         return FakeStreamer(text, out) if stream else out
 
 
@@ -1153,7 +1156,9 @@ def test_completions_runs_every_prompt_in_an_array():
     {'prompt': 'hi', 'n': 2},
     {'prompt': 'hi', 'best_of': 4},
     {'prompt': 'hi', 'suffix': 'tail'},     # fill-in-the-middle
-    {'prompt': 'hi', 'logprobs': 5},
+    {'prompt': 'hi', 'logprobs': 21},       # above the cap
+    {'prompt': 'hi', 'logprobs': 'yes'},
+    {'prompt': 'hi', 'logprobs': -1},
     {'prompt': 'hi', 'echo': 'yes'},
     {'prompt': 'hi', 'stream': 'yes'},
     {'prompt': 'hi\x00there'},
@@ -1234,3 +1239,114 @@ def test_completions_streaming_keeps_each_prompt_on_its_own_index():
         choice = event['choices'][0]
         by_index[choice['index']] = by_index.get(choice['index'], '') + choice['text']
     assert by_index == {0: '<one>', 1: '<two>'}
+
+
+# ---------------------------------------------------------------------------
+# logprobs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(('payload', 'expected'), [
+    ({}, 0),
+    ({'logprobs': False}, 0),
+    # The native side always reports the token it sampled, so "logprobs on,
+    # no alternatives" is still a request for one entry.
+    ({'logprobs': True}, 1),
+    ({'logprobs': True, 'top_logprobs': 0}, 1),
+    ({'logprobs': True, 'top_logprobs': 5}, 5),
+])
+def test_chat_logprobs_request_shapes(payload, expected):
+    assert server._parse_logprobs_request(payload, chat=True) == expected
+
+
+@pytest.mark.parametrize('payload', [
+    {'logprobs': 3},                      # chat spells it as a boolean
+    {'top_logprobs': 3},                  # without logprobs: true
+    {'logprobs': True, 'top_logprobs': 21},
+    {'logprobs': True, 'top_logprobs': -1},
+    {'logprobs': True, 'top_logprobs': 'many'},
+])
+def test_chat_logprobs_request_rejects_bad_shapes(payload):
+    with pytest.raises(ValueError):
+        server._parse_logprobs_request(payload, chat=True)
+
+
+@pytest.mark.parametrize(('payload', 'expected'), [
+    ({}, 0),
+    ({'logprobs': 0}, 1),                 # the older endpoint spells it as a count
+    ({'logprobs': 4}, 4),
+])
+def test_completion_logprobs_request_shapes(payload, expected):
+    assert server._parse_logprobs_request(payload, chat=False) == expected
+
+
+def _fake_step(token: str, token_id: int, logprob: float, top=()):
+    from unirt.generation.output import Logprob, TokenLogprobs
+
+    return TokenLogprobs(
+        chosen=Logprob(token=token, token_id=token_id, logprob=logprob),
+        top=tuple(Logprob(token=t, token_id=i, logprob=p) for t, i, p in top),
+    )
+
+
+def test_logprob_payload_matches_the_openai_shape():
+    payload = server._logprob_payload([
+        _fake_step('Hi', 42, -0.25, top=[('Hi', 42, -0.25), ('Hey', 43, -1.5)]),
+    ])
+    entry = payload['content'][0]
+    assert entry['token'] == 'Hi'
+    assert entry['logprob'] == -0.25
+    # bytes let a client rebuild a character a single token only carries part
+    # of, which `token` alone cannot express.
+    assert entry['bytes'] == [72, 105]
+    assert [alt['token'] for alt in entry['top_logprobs']] == ['Hi', 'Hey']
+
+
+def test_logprob_bytes_survive_a_token_that_is_not_whole_text():
+    """Tokens split multi-byte characters routinely; the bytes field is the
+    only part of the response that stays faithful when that happens."""
+    payload = server._logprob_payload([_fake_step('�', 7, -2.0)])
+    assert payload['content'][0]['bytes'] == list('�'.encode('utf-8'))
+
+
+def test_pending_logprobs_attaches_each_token_to_the_chunk_it_produced():
+    """A chunk is not a token: the bridge holds a piece back until the bytes
+    that finish its character arrive, so one chunk can cover several tokens."""
+    streamer = SimpleNamespace(logprobs=[
+        _fake_step('a', 1, -0.1), _fake_step('b', 2, -0.2), _fake_step('c', 3, -0.3),
+    ])
+    first = server._pending_logprobs(streamer, 0)
+    assert [entry['token'] for entry in first['content']] == ['a', 'b', 'c']
+    # Nothing new since: no logprobs block rather than a repeat of the last.
+    assert server._pending_logprobs(streamer, 3) is None
+    assert [e['token'] for e in server._pending_logprobs(streamer, 2)['content']] == ['c']
+
+
+def test_no_logprobs_asked_for_means_no_logprobs_block():
+    assert server._pending_logprobs(SimpleNamespace(logprobs=None), 0) is None
+
+
+def test_the_two_endpoints_use_different_logprob_shapes():
+    """Not an accident to paper over: /v1/completions predates the per-token
+    object list and carries four parallel arrays instead. A client built on
+    the official schema rejects the chat shape there outright."""
+    steps = [
+        _fake_step(' Paris', 10, -0.76, top=[(' the', 11, -1.33)]),
+        _fake_step('.', 12, -0.62),
+    ]
+    chat = server._logprob_payload(steps)
+    legacy = server._legacy_logprob_payload(steps, 0)
+
+    assert set(chat) == {'content'}
+    assert set(legacy) == {'tokens', 'token_logprobs', 'top_logprobs', 'text_offset'}
+    assert legacy['tokens'] == [' Paris', '.']
+    assert legacy['token_logprobs'] == [-0.76, -0.62]
+    # A mapping per position, not a list of objects.
+    assert legacy['top_logprobs'] == [{' the': -1.33}, {}]
+
+
+def test_legacy_text_offsets_track_the_returned_text():
+    steps = [_fake_step('ab', 1, -0.1), _fake_step('cde', 2, -0.2), _fake_step('f', 3, -0.3)]
+    assert server._legacy_logprob_payload(steps, 0)['text_offset'] == [0, 2, 5]
+    # echo puts the prompt in front of the completion, so every token moves.
+    assert server._legacy_logprob_payload(steps, 7)['text_offset'] == [7, 9, 12]

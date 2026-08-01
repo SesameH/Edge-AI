@@ -108,6 +108,16 @@ if(UNIRT_NATIVE_TESTS AND UNIRT_PLUGIN_MLX)
 endif()
 
 if(UNIRT_NATIVE_TESTS)
+    # Prints the C layout of every struct the Python binding mirrors, for
+    # tests/python/test_abi_layout.py to compare against ctypes. Header-only:
+    # it links nothing, so it builds in every configuration.
+    add_executable(
+        unirt-abi-layout-test
+        "${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/test_abi_layout.cpp")
+    target_include_directories(unirt-abi-layout-test PRIVATE ${COMMON_INCLUDE})
+    set_target_properties(unirt-abi-layout-test PROPERTIES MACOSX_BUNDLE FALSE)
+    add_test(NAME unirt-abi-layout COMMAND unirt-abi-layout-test)
+
     add_executable(
         unirt-static-registration-test
         "${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/test_static_registration.cpp")

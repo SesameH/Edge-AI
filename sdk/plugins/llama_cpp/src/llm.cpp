@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <utility>
 
 #include "logging.h"
@@ -58,6 +59,92 @@ bool read_text_file(const char* path, std::string& output) {
     output.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
     return stream.good() || stream.eof();
 }
+
+// Reports the model's own log-probabilities for one decode step.
+//
+// Deliberately reads llama_get_logits_ith() rather than anything the sampler
+// chain produced: those are the raw model scores, before temperature, top_p or
+// a grammar has touched the distribution. That is what makes the number usable
+// as a confidence signal -- it says what the model believed, not what the
+// sampling settings allowed. Skipped entirely when logprobs is 0, since it
+// costs a full softmax over the vocabulary per token.
+class LogprobReporter {
+   public:
+    LogprobReporter(const llama_vocab* vocab, int32_t alternatives)
+        : vocab_(vocab), alternatives_(alternatives) {}
+
+    /** Emit the sampled token and its top alternatives. False = caller stopped us. */
+    bool report(
+        llama_context* context, llama_token sampled, unirt_logprob_callback callback,
+        void* user_data) {
+        const float* logits = llama_get_logits_ith(context, -1);
+        const int32_t vocab_size = llama_vocab_n_tokens(vocab_);
+        if (!logits || vocab_size <= 0) return true;
+
+        // log-softmax the stable way: subtracting the max keeps exp() in range
+        // for the large-magnitude logits that quantized models produce.
+        float max_logit = logits[0];
+        for (int32_t id = 1; id < vocab_size; ++id) max_logit = std::max(max_logit, logits[id]);
+        double sum = 0.0;
+        for (int32_t id = 0; id < vocab_size; ++id) sum += std::exp(logits[id] - max_logit);
+        const double log_normalizer = std::log(sum) + max_logit;
+
+        ranked_.resize(static_cast<size_t>(vocab_size));
+        for (int32_t id = 0; id < vocab_size; ++id) ranked_[static_cast<size_t>(id)] = id;
+        // The sampled token comes first whether or not it is the most likely
+        // one -- with any temperature above zero it often is not.
+        const size_t wanted = std::min<size_t>(
+            static_cast<size_t>(alternatives_), ranked_.size());
+        if (wanted > 0) {
+            std::partial_sort(
+                ranked_.begin(), ranked_.begin() + static_cast<ptrdiff_t>(wanted), ranked_.end(),
+                [logits](llama_token a, llama_token b) { return logits[a] > logits[b]; });
+        }
+
+        entries_.clear();
+        pieces_.clear();
+        pieces_.reserve(wanted + 1);
+        append(sampled, logits, log_normalizer);
+        for (size_t index = 0; index < wanted; ++index) {
+            if (ranked_[index] == sampled) continue;
+            append(ranked_[index], logits, log_normalizer);
+        }
+        // The piece strings are only stable once the vector has stopped
+        // growing, so the pointers go in last.
+        for (size_t index = 0; index < entries_.size(); ++index) {
+            entries_[index].piece = pieces_[index].c_str();
+        }
+        return callback(entries_.data(), static_cast<int32_t>(entries_.size()), user_data);
+    }
+
+   private:
+    void append(llama_token token, const float* logits, double log_normalizer) {
+        pieces_.push_back(piece_of(token));
+        unirt_Logprob entry{};
+        entry.token_id = token;
+        entry.logprob  = static_cast<float>(logits[token] - log_normalizer);
+        entries_.push_back(entry);
+    }
+
+    std::string piece_of(llama_token token) const {
+        std::vector<char> buffer(64);
+        int32_t length = llama_token_to_piece(
+            vocab_, token, buffer.data(), static_cast<int32_t>(buffer.size()), 0, true);
+        if (length < 0 && length != std::numeric_limits<int32_t>::min()) {
+            buffer.resize(static_cast<size_t>(-length));
+            length = llama_token_to_piece(
+                vocab_, token, buffer.data(), static_cast<int32_t>(buffer.size()), 0, true);
+        }
+        if (length < 0) return {};
+        return std::string(buffer.data(), static_cast<size_t>(length));
+    }
+
+    const llama_vocab*         vocab_;
+    int32_t                    alternatives_;
+    std::vector<llama_token>   ranked_;
+    std::vector<std::string>   pieces_;
+    std::vector<unirt_Logprob> entries_;
+};
 
 bool valid_sampler_config(const unirt_SamplerConfig& config) {
     return config.top_k >= 0 &&
@@ -525,6 +612,7 @@ int32_t LlamaCppLlm::generate(
     std::vector<std::string> stops;
     const unirt_SamplerConfig* sampler_config = nullptr;
     int32_t requested_past = 0;
+    int32_t logprob_alternatives = 0;
     if (input->config) {
         if (input->config->max_tokens > 0) max_tokens = input->config->max_tokens;
         if (input->config->stop_count < 0 ||
@@ -538,6 +626,8 @@ int32_t LlamaCppLlm::generate(
         }
         sampler_config = input->config->sampler_config;
         requested_past = input->config->n_past;
+        if (input->config->logprobs < 0) return UNIRT_ERROR_COMMON_INVALID_INPUT;
+        logprob_alternatives = input->config->logprobs;
         if (input->config->sliding_window_n_keep > 0) {
             pinned_head_ = input->config->sliding_window_n_keep;
         }
@@ -637,6 +727,12 @@ int32_t LlamaCppLlm::generate(
     int32_t generated = 0;
     int64_t first_token_time = monotonic_us();
 
+    std::optional<LogprobReporter> reporter;
+    if (input->on_logprob && logprob_alternatives >= 0 && input->config &&
+        input->config->logprobs > 0) {
+        reporter.emplace(vocab_, logprob_alternatives);
+    }
+
     while (generated < max_tokens) {
         if (history_.size() >= static_cast<size_t>(context_size_) && evict_for_space(1) == 0) {
             stop_reason = "context_length";
@@ -663,6 +759,15 @@ int32_t LlamaCppLlm::generate(
 
         std::string piece = token_piece(token);
         if (generated == 0) first_token_time = monotonic_us();
+
+        // Before decode(): the logits still belong to the step that produced
+        // this token. Decoding it overwrites them with the next step's.
+        if (reporter && !reporter->report(
+                            context_.get(), token, input->on_logprob, input->user_data)) {
+            stream_state.discard_unemitted();
+            stop_reason = "user";
+            break;
+        }
 
         // Commit every non-EOG sampled token before exposing it.  This keeps
         // llama.cpp's KV state and history_ identical even for max-length,
