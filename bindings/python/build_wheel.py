@@ -65,12 +65,31 @@ def _stamp_version(version_file: Path, version: str) -> None:
     version_file.write_text(updated, encoding='utf-8')
 
 
-def _verify_wheel(wheel_path: Path, version: str, platform_tag: str) -> None:
+def _staged_native_files(staged_lib: Path) -> set[str]:
+    """Every native file staged for the wheel, as its archive path."""
+    return {
+        'unirt/lib/' + path.relative_to(staged_lib).as_posix()
+        for path in staged_lib.rglob('*')
+        if path.is_file()
+    }
+
+
+def _verify_wheel(
+    wheel_path: Path, version: str, platform_tag: str, staged_native: set[str]
+) -> None:
     main_library, plugin_library = _native_names(platform_tag)
     expected = {
         f'unirt/lib/{main_library}',
         f'unirt/lib/llama_cpp/{plugin_library}',
     }
+    # Everything staged has to survive into the archive. setuptools takes the
+    # native tree through package-data globs (`lib/*`, `lib/*/*`), which are
+    # depth-limited and silently drop whatever they do not match -- and a
+    # dropped file is not a build error, it is a wheel that installs and then
+    # cannot find a backend. Checking the staged set rather than a hardcoded
+    # list means a new native file is covered the day it is added: the ggml
+    # backend modules of a Vulkan build are the current example.
+    expected |= staged_native
     with zipfile.ZipFile(wheel_path) as archive:
         names = set(archive.namelist())
         missing = sorted(expected - names)
@@ -113,6 +132,7 @@ def build_wheel(
         staging = Path(temporary) / 'python'
         shutil.copytree(source_dir, staging, ignore=_ignore_source)
         shutil.copytree(native_lib, staging / 'unirt' / 'lib', symlinks=True)
+        staged_native = _staged_native_files(staging / 'unirt' / 'lib')
         _stamp_version(staging / 'unirt' / '_version.py', version)
 
         subprocess.run(
@@ -145,7 +165,7 @@ def build_wheel(
         destination = output_dir / tagged[0].name
         shutil.copy2(tagged[0], destination)
 
-    _verify_wheel(destination, version, platform_tag)
+    _verify_wheel(destination, version, platform_tag, staged_native)
     return destination
 
 

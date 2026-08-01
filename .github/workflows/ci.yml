@@ -95,9 +95,12 @@ jobs:
         run: python -m pytest tests/python -q
 
   linux:
-    name: Linux x64 (llama_cpp)
+    name: Linux x64 (llama_cpp + Vulkan)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # ggml-vulkan is ~420 shader translation units plus one very large
+    # ggml-vulkan.cpp; a cold ccache takes most of an hour on 4 cores, a warm
+    # one takes minutes.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Fetch llama.cpp submodule
@@ -105,16 +108,45 @@ jobs:
       - name: Compiler cache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: linux-x64
+          key: linux-x64-vulkan
+      - name: Vulkan toolchain and a software driver to run on
+        # 24.04 packages headers new enough for current ggml-vulkan, so this is
+        # the cheap place to compile the backend -- the release job has to build
+        # its own glslc inside manylinux. lavapipe is Mesa's software Vulkan
+        # implementation: a real Vulkan device on a runner with no GPU.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq glslc libvulkan-dev spirv-headers \
+            mesa-vulkan-drivers vulkan-tools
+          vulkaninfo --summary 2>/dev/null | grep -E 'deviceName|deviceType' || true
       - name: Configure
         run: >
           cmake -S sdk -B build -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
+          -DUNIRT_LLAMA_VULKAN=ON
       - name: Build
         run: cmake --build build -j4
       - name: Install
         run: cmake --install build --prefix sdk/pkg-unirt
+      - name: The plugin itself must not depend on the Vulkan loader
+        # The reason the ggml backends are separate loadable modules: a machine
+        # with no Vulkan driver has no libvulkan.so.1, and a plugin that needs
+        # one there fails to dlopen and takes CPU inference down with it. Only
+        # libggml-vulkan.so may name it, and that module is skipped when it
+        # cannot load.
+        run: |
+          set -e
+          for library in libunirt_plugin.so libggml.so; do
+            if readelf -d "sdk/pkg-unirt/lib/llama_cpp/$library" | grep -q libvulkan; then
+              echo "::error::$library links the Vulkan loader; CPU-only machines would lose the plugin"
+              exit 1
+            fi
+          done
+          if ! readelf -d sdk/pkg-unirt/lib/llama_cpp/libggml-vulkan.so | grep libvulkan; then
+            echo "::error::libggml-vulkan.so does not name the Vulkan loader, so it cannot be a Vulkan build"
+            exit 1
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -139,6 +171,16 @@ jobs:
           python -m pip install -e bindings/python pytest
       - name: Run tests
         run: python -m pytest tests/python -q
+      - name: Decode on the Vulkan device
+        # ggml-vulkan refuses PHYSICAL_DEVICE_TYPE_CPU devices when it picks for
+        # itself -- correct, since a software rasterizer loses to the CPU
+        # backend -- so lavapipe has to be named explicitly. What this proves is
+        # the plumbing: the module ships, loads, enumerates, and a real forward
+        # pass runs on a Vulkan queue. Which physical device a user gets is
+        # ggml's choice, and unrelated to any of that.
+        env:
+          GGML_VK_VISIBLE_DEVICES: '0'
+        run: python bindings/python/smoke_vulkan_wheel.py models/SmolLM2-135M-Instruct-Q8_0.gguf
 
   android:
     name: Android arm64-v8a (build)

@@ -68,11 +68,49 @@ def test_verify_wheel_checks_native_layout(tmp_path):
         archive.writestr('unirt/lib/libunirt.so', b'native')
         archive.writestr('unirt/lib/llama_cpp/libunirt_plugin.so', b'plugin')
 
-    helper._verify_wheel(wheel, '2.3.4', tag)
+    helper._verify_wheel(wheel, '2.3.4', tag, set())
 
     broken = tmp_path / 'broken.whl'
     with zipfile.ZipFile(broken, 'w') as archive:
         archive.writestr('unirt/_version.py', 'VERSION = (2, 3, 4)\n')
         archive.writestr('unirt/lib/libunirt.so', b'native')
     with pytest.raises(RuntimeError, match='libunirt_plugin.so'):
-        helper._verify_wheel(broken, '2.3.4', tag)
+        helper._verify_wheel(broken, '2.3.4', tag, set())
+
+
+def test_staged_native_files_walks_the_whole_tree(tmp_path):
+    helper = _load_helper()
+    staged = tmp_path / 'lib'
+    (staged / 'llama_cpp').mkdir(parents=True)
+    (staged / 'libunirt.so').write_bytes(b'native')
+    (staged / 'llama_cpp' / 'libunirt_plugin.so').write_bytes(b'plugin')
+    (staged / 'llama_cpp' / 'libggml-vulkan.so').write_bytes(b'backend module')
+
+    assert helper._staged_native_files(staged) == {
+        'unirt/lib/libunirt.so',
+        'unirt/lib/llama_cpp/libunirt_plugin.so',
+        'unirt/lib/llama_cpp/libggml-vulkan.so',
+    }
+
+
+def test_a_native_file_dropped_between_staging_and_the_wheel_fails(tmp_path):
+    """setuptools takes the native tree through depth-limited package-data
+    globs, so a file that does not match is dropped with no error at all.
+    In a GGML_BACKEND_DL build the ggml backends are separate modules, and
+    losing libggml-cpu leaves a wheel that installs and then has no backend
+    to run on -- the smoke tests catch it, but only after a full build."""
+    helper = _load_helper()
+    tag = 'manylinux_2_28_x86_64'
+    staged = {
+        'unirt/lib/libunirt.so',
+        'unirt/lib/llama_cpp/libunirt_plugin.so',
+        'unirt/lib/llama_cpp/libggml-cpu.so',
+    }
+    wheel = tmp_path / 'dropped.whl'
+    with zipfile.ZipFile(wheel, 'w') as archive:
+        archive.writestr('unirt/_version.py', 'VERSION = (2, 3, 4)\n')
+        archive.writestr('unirt/lib/libunirt.so', b'native')
+        archive.writestr('unirt/lib/llama_cpp/libunirt_plugin.so', b'plugin')
+
+    with pytest.raises(RuntimeError, match='libggml-cpu.so'):
+        helper._verify_wheel(wheel, '2.3.4', tag, staged)

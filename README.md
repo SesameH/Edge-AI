@@ -143,6 +143,33 @@ When setting `CMAKE_OSX_DEPLOYMENT_TARGET`, pass the same value to both the MLX
 and UniRT configure commands. If omitted, both builds use the current host
 macOS version.
 
+### Vulkan (Linux and Windows GPUs)
+
+`-DUNIRT_LLAMA_VULKAN=ON` builds the llama.cpp backend with Vulkan, which
+covers NVIDIA, AMD, Intel and the mobile vendors from one build with no vendor
+SDK involved. The published Linux wheels have it on; macOS uses Metal instead,
+and the option is off by default everywhere.
+
+```sh
+# Ubuntu 24.04 or newer -- older headers predate the VK_EXT_layer_settings
+# structs ggml-vulkan uses, and configure fails on them.
+sudo apt-get install glslc libvulkan-dev spirv-headers
+cmake -S sdk -B build -DCMAKE_BUILD_TYPE=Release -DUNIRT_LLAMA_VULKAN=ON
+```
+
+The flag also turns on `GGML_BACKEND_DL`, which builds every ggml backend as
+its own loadable module under `lib/llama_cpp/` (`libggml-cpu.so`,
+`libggml-vulkan.so`) instead of linking them into `libggml`. That is not an
+implementation detail: `libggml-vulkan.so` needs `libvulkan.so.1`, which only
+exists where a Vulkan driver is installed, so linking it in would make the
+whole plugin fail to load on a slim container or a driverless server and lose
+CPU inference along with it. As separate modules, a missing Vulkan loader costs
+exactly the Vulkan backend. The plugin registers the modules from its own
+directory at load time, so the installed tree stays relocatable.
+
+A machine with no Vulkan device runs on the CPU with no configuration.
+`unirt devices` lists what was actually found.
+
 ## Quick test
 
 ```sh

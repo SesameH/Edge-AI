@@ -3,6 +3,9 @@ build/
 build-*/
 cmake-build-*/
 sdk/pkg-unirt/
+# Install prefixes from cross-platform builds (the Linux/Vulkan container work)
+pkg-*/
+vulkan-toolchain/
 target/
 compile_commands.json
 

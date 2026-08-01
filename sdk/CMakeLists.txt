@@ -39,6 +39,12 @@ option(UNIRT_BUILD_SHARED      "Build libunirt and plugins as shared libraries" 
 option(UNIRT_PLUGIN_LLAMA_CPP  "Enable llama.cpp backend"       ON)
 option(UNIRT_PLUGIN_MLX        "Enable MLX backend (Apple)"     ON)
 option(UNIRT_PLUGIN_ONNXRUNTIME "Enable ONNX Runtime embedding backend" ON)
+# Vulkan reaches NVIDIA, AMD, Intel and the mobile vendors from a single build,
+# with no vendor SDK on the build machine and no per-vendor wheel. Off by
+# default because it needs Vulkan headers, a loader and glslc present; the
+# Linux release job turns it on. See plugins/llama_cpp/CMakeLists.txt for why
+# it also implies GGML_BACKEND_DL.
+option(UNIRT_LLAMA_VULKAN      "Build the llama.cpp backend with Vulkan" OFF)
 option(UNIRT_BENCHMARK         "Build benchmark example"        OFF)
 option(UNIRT_PYTHON_TESTS      "Register Python architecture tests with CTest" ON)
 option(UNIRT_NATIVE_TESTS      "Build native validation tests"   ON)
@@ -64,6 +70,7 @@ message(STATUS "UNIRT_VERSION:          ${UNIRT_VERSION}")
 message(STATUS "UNIRT_PLUGIN_LLAMA_CPP: ${UNIRT_PLUGIN_LLAMA_CPP}")
 message(STATUS "UNIRT_PLUGIN_MLX:       ${UNIRT_PLUGIN_MLX}")
 message(STATUS "UNIRT_PLUGIN_ONNXRUNTIME: ${UNIRT_PLUGIN_ONNXRUNTIME}")
+message(STATUS "UNIRT_LLAMA_VULKAN:     ${UNIRT_LLAMA_VULKAN}")
 message(STATUS "UNIRT_BENCHMARK:        ${UNIRT_BENCHMARK}")
 message(STATUS "=======================================")
 

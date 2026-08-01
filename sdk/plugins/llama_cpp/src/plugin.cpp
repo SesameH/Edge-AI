@@ -12,6 +12,7 @@
 #include <llama.h>
 #include <mtmd-helper.h>
 
+#include "backend_modules.h"
 #include "build_config.h"
 #include "embedding.h"
 #include "llm.h"
@@ -56,6 +57,11 @@ void acquire_backend() {
     if (backend_users++ == 0) {
         llama_log_set(llama_log_bridge, nullptr);
         mtmd_helper_log_set(llama_log_bridge, nullptr);
+        // Before llama_backend_init(), which otherwise runs ggml's own default
+        // module search (executable directory, working directory) and finds
+        // nothing -- ours live beside this plugin. Registering first also makes
+        // that fallback a no-op, since it only runs on an empty registry.
+        load_ggml_backend_modules();
         llama_backend_init();
     }
 }

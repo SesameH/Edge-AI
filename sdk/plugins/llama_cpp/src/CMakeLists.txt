@@ -1,13 +1,19 @@
 if(UNIRT_BUILD_SHARED)
-    add_library(unirt_llama_cpp SHARED plugin.cpp llm.cpp vlm.cpp embedding.cpp schema_grammar.cpp)
+    add_library(unirt_llama_cpp SHARED plugin.cpp llm.cpp vlm.cpp embedding.cpp schema_grammar.cpp backend_modules.cpp)
     target_compile_definitions(unirt_llama_cpp PUBLIC UNIRT_SHARED)
 else()
     # Static plugin: the app links it and calls
     # unirt_register_plugin(unirt_plugin_id, unirt_plugin_open).
-    add_library(unirt_llama_cpp STATIC plugin.cpp llm.cpp vlm.cpp embedding.cpp schema_grammar.cpp)
+    add_library(unirt_llama_cpp STATIC plugin.cpp llm.cpp vlm.cpp embedding.cpp schema_grammar.cpp backend_modules.cpp)
 endif()
 
 target_include_directories(unirt_llama_cpp PUBLIC ${COMMON_INCLUDE})
+
+if(GGML_BACKEND_DL)
+    # backend_modules.cpp only has work to do when ggml's backends are separate
+    # loadable modules; see the plugin's CMakeLists for why Vulkan requires that.
+    target_compile_definitions(unirt_llama_cpp PRIVATE UNIRT_GGML_BACKEND_DL)
+endif()
 
 target_link_libraries(unirt_llama_cpp
     PUBLIC  llama mtmd

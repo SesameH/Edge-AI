@@ -154,7 +154,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container:
       image: ${{ matrix.image }}
-    timeout-minutes: 75
+    # Building glslc (cached) and then all of ggml-vulkan's shader translation
+    # units, with no ccache in this job at all.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - name: Trust the workspace (container job)
@@ -170,6 +172,17 @@ jobs:
           echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
           /opt/python/cp312-cp312/bin/python -m pip install --quiet \
             auditwheel build cmake ninja wheel
+      - name: Cache the Vulkan shader toolchain
+        id: vulkan-toolchain
+        uses: actions/cache@v4
+        with:
+          path: vulkan-toolchain
+          # Keyed on the script, which is where the pinned shaderc tag lives.
+          key: vulkan-toolchain-${{ matrix.arch }}-${{ hashFiles('tools/ci/setup_vulkan_manylinux.sh') }}
+      - name: Vulkan shader toolchain
+        # AlmaLinux 8 has the Vulkan headers and loader but no shaderc at all,
+        # so glslc gets built here. See the script for why that is unavoidable.
+        run: tools/ci/setup_vulkan_manylinux.sh vulkan-toolchain
       - name: Fetch the ONNX Runtime SDK
         run: |
           mkdir -p build-onnxruntime
@@ -182,6 +195,9 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DUNIRT_VERSION="${GITHUB_REF_NAME}" \
             -DUNIRT_PLUGIN_MLX=OFF \
+            -DUNIRT_LLAMA_VULKAN=ON \
+            -DCMAKE_PREFIX_PATH="$PWD/vulkan-toolchain" \
+            -DVulkan_GLSLC_EXECUTABLE="$PWD/vulkan-toolchain/bin/glslc" \
             -DUNIRT_ONNXRUNTIME_ROOT="$PWD/build-onnxruntime/onnxruntime-${{ matrix.ort_arch }}-${ORT_VERSION}" \
             -DUNIRT_NATIVE_TESTS=OFF \
             -DUNIRT_PYTHON_TESTS=OFF
@@ -192,6 +208,32 @@ jobs:
             test -f "sdk/pkg-unirt/lib/$runtime/libunirt_plugin.so" \
               || { echo "::error::$runtime plugin missing from the install prefix"; exit 1; }
           done
+          # A Vulkan build makes every ggml backend a separate loadable module.
+          # Losing the CPU one leaves a wheel with no backend at all; losing the
+          # Vulkan one silently downgrades every GPU machine to CPU. Neither
+          # shows up as a build failure.
+          for backend in cpu vulkan; do
+            test -f "sdk/pkg-unirt/lib/llama_cpp/libggml-$backend.so" \
+              || { echo "::error::ggml $backend backend module missing from the install prefix"; exit 1; }
+          done
+      - name: The plugin itself must not depend on the Vulkan loader
+        # Why the backends are modules at all: libvulkan.so.1 exists only where
+        # a Vulkan driver is installed. A plugin that names it as a hard
+        # dependency fails to dlopen on a slim container or a driverless server
+        # and takes CPU inference with it -- the same shape as the OpenSSL
+        # dependency that shipped in 0.2.2. Only libggml-vulkan.so may need it.
+        run: |
+          set -e
+          for library in libunirt_plugin.so libggml.so; do
+            if readelf -d "sdk/pkg-unirt/lib/llama_cpp/$library" | grep -q libvulkan; then
+              echo "::error::$library links the Vulkan loader; CPU-only machines would lose the plugin"
+              exit 1
+            fi
+          done
+          if ! readelf -d sdk/pkg-unirt/lib/llama_cpp/libggml-vulkan.so | grep libvulkan; then
+            echo "::error::libggml-vulkan.so does not name the Vulkan loader, so it cannot be a Vulkan build"
+            exit 1
+          fi
       - name: Build + audit + smoke-test wheel
         run: |
           set -e
@@ -262,6 +304,70 @@ jobs:
           smoke/bin/python -m pip install --quiet wheel/*.whl
           smoke/bin/unirt devices
           smoke/bin/python bindings/python/smoke_inference_wheel.py \
+            models/SmolLM2-135M-Instruct-Q8_0.gguf
+      - name: A machine with no Vulkan driver must lose only Vulkan
+        # bullseye-slim has no Vulkan loader, which makes it the exact
+        # environment the loadable-module layout exists for: libggml-vulkan.so
+        # cannot load, and everything else has to carry on. The inference above
+        # already ran, so this only has to confirm the reason it could.
+        run: |
+          set -e
+          if ldconfig -p | grep -q libvulkan; then
+            echo "::error::this image has a Vulkan loader, so it no longer tests the missing-loader path"
+            exit 1
+          fi
+          if smoke/bin/unirt devices | grep -qi vulkan; then
+            echo "::error::a Vulkan device appeared on a machine with no Vulkan loader"
+            exit 1
+          fi
+          echo "no Vulkan loader, no Vulkan device, CPU inference unaffected"
+
+  smoke-linux-vulkan:
+    name: Inference on a Vulkan device (${{ matrix.arch }})
+    needs: build-python-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      # ggml-vulkan will not choose a PHYSICAL_DEVICE_TYPE_CPU device for
+      # itself -- rightly, a software rasterizer loses to the CPU backend --
+      # so lavapipe has to be named. That makes this a test of the plumbing:
+      # the module ships in the wheel, loads, enumerates a device, and runs a
+      # forward pass on a Vulkan queue. Which GPU a user gets is ggml's
+      # decision and independent of all of it.
+      GGML_VK_VISIBLE_DEVICES: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: publish-wheel-linux-${{ matrix.arch }}
+          path: wheel
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install a software Vulkan driver
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mesa-vulkan-drivers vulkan-tools
+          vulkaninfo --summary 2>/dev/null | grep -E 'deviceName|deviceType' || true
+      - name: Fetch the test model
+        run: |
+          mkdir -p models
+          curl -fL -o models/SmolLM2-135M-Instruct-Q8_0.gguf "$GGUF_URL"
+      - name: Install the wheel and decode on Vulkan
+        run: |
+          set -e
+          python3 -m venv smoke
+          smoke/bin/python -m pip install --quiet --upgrade pip
+          smoke/bin/python -m pip install --quiet wheel/*.whl
+          smoke/bin/python bindings/python/smoke_vulkan_wheel.py \
             models/SmolLM2-135M-Instruct-Q8_0.gguf
 
   build-python-windows:
@@ -387,7 +493,7 @@ jobs:
     name: Sync wrapper source + release on unirt-sdk
     needs:
       [build-macos-ios, build-python-linux, build-python-windows, build-android,
-       smoke-linux]
+       smoke-linux, smoke-linux-vulkan]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
