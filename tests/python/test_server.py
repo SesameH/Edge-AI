@@ -1079,3 +1079,158 @@ def test_health_stays_open_so_probes_do_not_need_the_key():
 def test_no_api_key_configured_leaves_the_server_open():
     status, _, _ = _request(_keyed_server(None), 'GET', '/v1/models')
     assert status == 200
+
+
+# ---------------------------------------------------------------------------
+# /v1/completions -- the pre-chat endpoint
+# ---------------------------------------------------------------------------
+
+
+class EchoModel(FakeModel):
+    """Records the prompt it was handed, so tests can prove no template ran."""
+
+    def __init__(self):
+        super().__init__()
+        self.prompts: list[str] = []
+
+    def generate(self, prompt, *, stream: bool = False, **_kwargs):
+        self.prompts.append(prompt)
+        text = f'<{prompt}>'
+        profile = SimpleNamespace(stop_reason='eos', prompt_tokens=3, generated_tokens=2)
+        out = SimpleNamespace(text=text, profile=profile)
+        return FakeStreamer(text, out) if stream else out
+
+
+def _completion_server(model):
+    return server.UniRTHTTPServer(('127.0.0.1', 0), model, 'fake-model')
+
+
+def test_completions_sends_the_prompt_through_untouched():
+    """No chat template: that is the reason this endpoint exists next to
+    /v1/chat/completions, and a base model has no template to apply anyway."""
+    model = EchoModel()
+    status, body = _post_to(
+        _completion_server(model), '/v1/completions', {'prompt': 'Once upon a'}
+    )
+    assert status == 200
+    assert model.prompts == ['Once upon a']
+    assert body['object'] == 'text_completion'
+    assert body['id'].startswith('cmpl-')
+    assert body['choices'] == [
+        {'index': 0, 'text': '<Once upon a>', 'logprobs': None, 'finish_reason': 'stop'}
+    ]
+    assert body['usage'] == {'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
+
+
+def test_completions_echo_prepends_the_prompt():
+    status, body = _post_to(
+        _completion_server(EchoModel()),
+        '/v1/completions',
+        {'prompt': 'seed', 'echo': True},
+    )
+    assert status == 200
+    assert body['choices'][0]['text'] == 'seed<seed>'
+
+
+def test_completions_runs_every_prompt_in_an_array():
+    model = EchoModel()
+    status, body = _post_to(
+        _completion_server(model), '/v1/completions', {'prompt': ['a', 'b', 'c']}
+    )
+    assert status == 200
+    assert model.prompts == ['a', 'b', 'c']
+    assert [choice['index'] for choice in body['choices']] == [0, 1, 2]
+    assert [choice['text'] for choice in body['choices']] == ['<a>', '<b>', '<c>']
+    # Usage is the whole request, not the last prompt in it.
+    assert body['usage']['total_tokens'] == 15
+
+
+@pytest.mark.parametrize('payload', [
+    {},                                     # no prompt at all
+    {'prompt': ''},                         # empty is not a prompt
+    {'prompt': []},
+    {'prompt': [1, 2, 3]},                  # pre-tokenized: generate() takes text
+    {'prompt': 'hi', 'n': 2},
+    {'prompt': 'hi', 'best_of': 4},
+    {'prompt': 'hi', 'suffix': 'tail'},     # fill-in-the-middle
+    {'prompt': 'hi', 'logprobs': 5},
+    {'prompt': 'hi', 'echo': 'yes'},
+    {'prompt': 'hi', 'stream': 'yes'},
+    {'prompt': 'hi\x00there'},
+])
+def test_completions_rejects_what_it_cannot_honour(payload):
+    """Accepting a parameter and quietly ignoring it is worse than refusing:
+    the reply would look correct while meaning something else."""
+    status, body = _post_to(_completion_server(EchoModel()), '/v1/completions', payload)
+    assert status == 400, body
+
+
+def test_completions_needs_a_chat_model():
+    status, body = _post_to(_completion_server(None), '/v1/completions', {'prompt': 'hi'})
+    assert status == 404
+    assert '--model' in body['error']['message']
+
+
+def _post_raw(httpd, path, payload):
+    """POST and return the raw body, for streaming responses."""
+    import http.client
+
+    port = httpd.server_address[1]
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+        try:
+            body = json.dumps(payload).encode()
+            connection.request(
+                'POST', path, body=body,
+                headers={'Content-Type': 'application/json', 'Content-Length': str(len(body))},
+            )
+            response = connection.getresponse()
+            return response.status, response.read().decode()
+        finally:
+            connection.close()
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+
+
+def _sse_events(raw: str) -> list[dict]:
+    return [
+        json.loads(line[len('data: '):])
+        for line in raw.splitlines()
+        if line.startswith('data: ') and line != 'data: [DONE]'
+    ]
+
+
+def test_completions_streaming_matches_the_blocking_text():
+    status, raw = _post_raw(
+        _completion_server(EchoModel()),
+        '/v1/completions',
+        {'prompt': 'stream me', 'stream': True},
+    )
+    assert status == 200
+    assert raw.rstrip().endswith('data: [DONE]')
+    events = _sse_events(raw)
+    assert all(event['object'] == 'text_completion' for event in events)
+    assert ''.join(event['choices'][0]['text'] for event in events) == '<stream me>'
+    # Exactly one terminating chunk, and it is the last.
+    finishes = [event['choices'][0]['finish_reason'] for event in events]
+    assert finishes[-1] == 'stop'
+    assert finishes.count('stop') == 1
+
+
+def test_completions_streaming_keeps_each_prompt_on_its_own_index():
+    status, raw = _post_raw(
+        _completion_server(EchoModel()),
+        '/v1/completions',
+        {'prompt': ['one', 'two'], 'stream': True},
+    )
+    assert status == 200
+    events = _sse_events(raw)
+    by_index: dict[int, str] = {}
+    for event in events:
+        choice = event['choices'][0]
+        by_index[choice['index']] = by_index.get(choice['index'], '') + choice['text']
+    assert by_index == {0: '<one>', 1: '<two>'}

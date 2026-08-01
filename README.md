@@ -225,9 +225,18 @@ PYTHONPATH=$PWD/bindings/python python3 -m unirt.server \
     --model models/SmolLM2-135M-Instruct --backend mlx --port 8080
 ```
 
-Serves `/v1/chat/completions` (blocking + SSE streaming), `/v1/embeddings` and
-`/v1/models`; works with the official `openai` Python client and anything else
-that speaks the OpenAI API (`base_url='http://127.0.0.1:8080/v1'`, any api_key).
+Serves `/v1/chat/completions` (blocking + SSE streaming), `/v1/completions`,
+`/v1/embeddings` and `/v1/models`; works with the official `openai` Python
+client and anything else that speaks the OpenAI API
+(`base_url='http://127.0.0.1:8080/v1'`, any api_key).
+
+`/v1/completions` is the pre-chat shape: the `prompt` reaches the model
+verbatim, with no chat template applied. That is what makes it useful next to
+the chat endpoint — base models have no template to apply, and some clients
+only ever learned this endpoint. It takes a string or an array of strings
+(each becomes its own choice), `echo`, and streaming. `n`, `best_of`, `suffix`
+and `logprobs` are refused rather than silently ignored, since a reply that
+quietly means something else is worse than an error.
 
 `--embedding-model` loads a text encoder for `/v1/embeddings`, alongside the
 chat model or on its own:
@@ -290,10 +299,16 @@ token; `--no-prefix-cache` restores a cold prefill per request.
 `response_format` (`json_object` / `json_schema`) and `tools` + `tool_choice`
 are both honoured by constraining decoding with a grammar, so a tool call from
 a 1B model still names a declared tool and carries arguments that validate
-against that tool's schema. Two limits worth knowing: one call per turn
-(no parallel calls), and a turn cannot use `tools` and `response_format`
-together, since they drive the same grammar slot. Streaming a tool turn sends
-the call as one finished delta rather than character by character.
+against that tool's schema. One limit worth knowing: a turn cannot use `tools`
+and `response_format` together, since they drive the same grammar slot.
+Streaming a tool turn sends the call as one finished delta rather than
+character by character.
+
+`parallel_tool_calls` defaults to **false** here where the hosted API defaults
+to true. Several calls at once means planning a whole batch before seeing any
+result, which is what small models are worst at, and a wrong extra call is a
+tool the caller actually executes. Pass `parallel_tool_calls: true` to opt in;
+the grammar then accepts `{"tool_calls": [...]}` and a turn may return several.
 
 Both text backends constrain decoding, by different routes: `llama_cpp`
 compiles the schema to GBNF, and MLX runs its own pushdown automaton over the

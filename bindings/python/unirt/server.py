@@ -14,6 +14,7 @@ Endpoints:
     GET  /v1/models
     GET  /v1/stats              (runtime_stats(): memory/device usage; not OpenAI-standard)
     POST /v1/chat/completions   (supports "stream": true via SSE)
+    POST /v1/completions        (the pre-chat shape: prompt in, no chat template)
     POST /v1/embeddings         (requires --embedding-model)
     POST /v1/rerank             (requires --rerank-model; the Cohere/Jina shape)
 
@@ -56,10 +57,13 @@ _MAX_EMBEDDING_INPUTS = 2048
 # Reranking is a cross-encoder pass per document, so a batch costs far more
 # than the same number of embeddings.
 _MAX_RERANK_DOCUMENTS = 512
+# /v1/completions takes an array of prompts, and each one is a full generation
+# run held on a single serialized model.
+_MAX_COMPLETION_PROMPTS = 16
 
 
-def _completion_id() -> str:
-    return 'chatcmpl-' + uuid.uuid4().hex[:24]
+def _completion_id(prefix: str = 'chatcmpl') -> str:
+    return f'{prefix}-' + uuid.uuid4().hex[:24]
 
 
 def _with_serialized_model(model, lock: threading.Lock, operation, *, reuse_prefix=True):
@@ -323,6 +327,56 @@ def _parse_generation_args(req: dict) -> dict:
         else:
             raise ValueError("response_format.type must be 'text', 'json_object' or 'json_schema'")
     return result
+
+
+def _parse_completion_request(req: dict) -> tuple[list[str], bool]:
+    """Validate a legacy /v1/completions body. Returns (prompts, echo).
+
+    The prompt goes to the model verbatim -- no chat template. That is the
+    whole point of this endpoint next to /v1/chat/completions, and the reason
+    it is still worth having: base models, fill-in-style prompting, and the
+    older clients that only ever learned this shape.
+    """
+
+    value = req.get('prompt')
+    if isinstance(value, str):
+        prompts = [value]
+    elif isinstance(value, list) and value and all(isinstance(item, str) for item in value):
+        prompts = list(value)
+    elif isinstance(value, list) and value:
+        # OpenAI also accepts pre-tokenized prompts here. generate() takes text,
+        # and silently detokenizing someone's ids would be a different prompt.
+        raise ValueError(
+            'prompt must be a string or an array of strings; token-array prompts '
+            'are not supported by this server'
+        )
+    else:
+        raise ValueError('prompt must be a non-empty string or array of strings')
+    if any(not prompt for prompt in prompts):
+        # OpenAI defaults an absent prompt to <|endoftext|>; guessing a token
+        # for a local model whose vocabulary may not have it would be worse
+        # than saying so.
+        raise ValueError('prompt entries must be non-empty')
+    if any('\x00' in prompt for prompt in prompts):
+        raise ValueError('prompt must not contain NUL bytes')
+    if len(prompts) > _MAX_COMPLETION_PROMPTS:
+        raise ValueError(f'prompt holds more than {_MAX_COMPLETION_PROMPTS} entries')
+
+    # Each of these would change what the caller gets back, so accepting and
+    # ignoring them is worse than refusing: the reply would look right.
+    for name in ('n', 'best_of'):
+        count = req.get(name)
+        if count is not None and count != 1:
+            raise ValueError(f'{name} must be 1; this server generates one completion per prompt')
+    if req.get('suffix') is not None:
+        raise ValueError('suffix (fill-in-the-middle) is not supported')
+    if req.get('logprobs') is not None:
+        raise ValueError('logprobs are not supported by this server')
+
+    echo = req.get('echo', False)
+    if not isinstance(echo, bool):
+        raise ValueError('echo must be a boolean')
+    return prompts, echo
 
 
 def _validate_messages(messages) -> list[dict[str, str]]:
@@ -644,6 +698,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/v1/rerank':
             self._handle_rerank()
             return
+        if self.path == '/v1/completions':
+            self._handle_completions()
+            return
         if self.path != '/v1/chat/completions':
             self._error(404, f'unknown path {self.path}')
             return
@@ -722,6 +779,126 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.server.request_slots.release()
             prepared.cleanup()
+
+    def _handle_completions(self) -> None:
+        """POST /v1/completions -- the pre-chat endpoint, prompt in, text out.
+
+        No chat template is applied: the prompt reaches the model exactly as
+        sent. Clients that only speak this shape, and base models with no chat
+        template at all, both need that.
+        """
+
+        model = self.server.model
+        if model is None:
+            self._error(404, 'this server was started without a chat model (--model)')
+            return
+        if isinstance(model, UniRTVLM):
+            self._error(400, '/v1/completions is text-only; this server loaded a VLM')
+            return
+        req = self._read_json_body()
+        if req is None:
+            return
+        try:
+            gen_kwargs = _parse_generation_args(req)
+            stream = req.get('stream', False)
+            if not isinstance(stream, bool):
+                raise ValueError('stream must be a boolean')
+            prompts, echo = _parse_completion_request(req)
+        except ValueError as exc:
+            self._error(400, str(exc))
+            return
+
+        if not self.server.request_slots.acquire(blocking=False):
+            self._busy()
+            return
+        try:
+            def run() -> None:
+                if stream:
+                    self._stream_text_completions(prompts, gen_kwargs, echo)
+                else:
+                    self._blocking_text_completions(prompts, gen_kwargs, echo)
+
+            _with_serialized_model(
+                model, self.server.gen_lock, run, reuse_prefix=self.server.reuse_prefix
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        except Exception as exc:  # noqa: BLE001 — HTTP boundary
+            if not self._response_started:
+                self._error(500, f'generation failed: {exc}')
+            else:
+                self.close_connection = True
+        finally:
+            self.server.request_slots.release()
+
+    def _blocking_text_completions(
+        self, prompts: list[str], gen_kwargs: dict, echo: bool
+    ) -> None:
+        choices = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        for index, prompt in enumerate(prompts):
+            out = self.server.model.generate(prompt, **gen_kwargs)
+            profile = out.profile
+            prompt_tokens += profile.prompt_tokens
+            completion_tokens += profile.generated_tokens
+            choices.append({
+                'index': index,
+                'text': (prompt + out.text) if echo else out.text,
+                'logprobs': None,
+                'finish_reason': (
+                    'stop' if profile.stop_reason in ('eos', 'stop_sequence') else 'length'
+                ),
+            })
+        self._json(200, {
+            'id': _completion_id('cmpl'),
+            'object': 'text_completion',
+            'created': int(time.time()),
+            'model': self.server.model_id,
+            'choices': choices,
+            'usage': {
+                'prompt_tokens': prompt_tokens,
+                'completion_tokens': completion_tokens,
+                'total_tokens': prompt_tokens + completion_tokens,
+            },
+        })
+
+    def _stream_text_completions(
+        self, prompts: list[str], gen_kwargs: dict, echo: bool
+    ) -> None:
+        self._begin_event_stream()
+        cid = _completion_id('cmpl')
+        created = int(time.time())
+
+        def chunk(index: int, text: str, finish=None) -> dict:
+            return {
+                'id': cid, 'object': 'text_completion', 'created': created,
+                'model': self.server.model_id,
+                'choices': [{
+                    'index': index, 'text': text, 'logprobs': None,
+                    'finish_reason': finish,
+                }],
+            }
+
+        # Prompts run one after another rather than interleaved: the model is
+        # serialized behind one KV cache, so there is no concurrency to express.
+        for index, prompt in enumerate(prompts):
+            if echo:
+                self._send_event(chunk(index, prompt))
+            streamer = self.server.model.generate(prompt, stream=True, **gen_kwargs)
+            try:
+                for piece in streamer:
+                    self._send_event(chunk(index, piece))
+            except (BrokenPipeError, ConnectionResetError):
+                self._drain_cancelled(streamer)
+                raise
+            out = streamer.output
+            finish = (
+                'stop' if out and out.profile.stop_reason in ('eos', 'stop_sequence')
+                else 'length'
+            )
+            self._send_event(chunk(index, '', finish=finish))
+        self._end_event_stream()
 
     def _handle_embeddings(self) -> None:
         model = self.server.embedding
@@ -862,7 +1039,7 @@ class Handler(BaseHTTPRequestHandler):
             },
         })
 
-    def _stream_completion(self, prompt: str, gen_kwargs: dict, plan=None) -> None:
+    def _begin_event_stream(self) -> None:
         self.send_response(200)
         self._cors()
         self.send_header('Content-Type', 'text/event-stream')
@@ -871,13 +1048,37 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self._response_started = True
 
+    def _send_event(self, payload: dict) -> None:
+        data = b'data: ' + json.dumps(payload).encode() + b'\n\n'
+        self.wfile.write(f'{len(data):x}\r\n'.encode() + data + b'\r\n')
+        self.wfile.flush()
+
+    def _end_event_stream(self) -> None:
+        done = b'data: [DONE]\n\n'
+        self.wfile.write(f'{len(done):x}\r\n'.encode() + done + b'\r\n')
+        self.wfile.write(b'0\r\n\r\n')
+        self.wfile.flush()
+
+    def _drain_cancelled(self, streamer) -> None:
+        """Stop a generation whose client has gone, without leaving the model mid-run.
+
+        The plugin keeps a token transcript that has to mirror its KV cache, so
+        the run must be allowed to unwind rather than abandoned; the caller then
+        resets anyway, but only after this returns.
+        """
+        streamer.cancel()
+        try:
+            for _ in streamer:
+                pass
+        except BaseException:
+            pass
+
+    def _stream_completion(self, prompt: str, gen_kwargs: dict, plan=None) -> None:
+        self._begin_event_stream()
+
         cid = _completion_id()
         created = int(time.time())
-
-        def send_chunk(payload: dict) -> None:
-            data = b'data: ' + json.dumps(payload).encode() + b'\n\n'
-            self.wfile.write(f'{len(data):x}\r\n'.encode() + data + b'\r\n')
-            self.wfile.flush()
+        send_chunk = self._send_event
 
         def delta(d: dict, finish=None) -> dict:
             return {
@@ -899,12 +1100,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     buffered.append(piece)
         except (BrokenPipeError, ConnectionResetError):
-            streamer.cancel()
-            try:
-                for _ in streamer:
-                    pass
-            except BaseException:
-                pass
+            self._drain_cancelled(streamer)
             raise
         out = streamer.output
         finish = 'stop' if out and out.profile.stop_reason in ('eos', 'stop_sequence') else 'length'
@@ -917,10 +1113,7 @@ class Handler(BaseHTTPRequestHandler):
                 ]
             send_chunk(delta(payload))
         send_chunk(delta({}, finish=finish))
-        done = b'data: [DONE]\n\n'
-        self.wfile.write(f'{len(done):x}\r\n'.encode() + done + b'\r\n')
-        self.wfile.write(b'0\r\n\r\n')
-        self.wfile.flush()
+        self._end_event_stream()
 
 
 class UniRTHTTPServer(ThreadingHTTPServer):

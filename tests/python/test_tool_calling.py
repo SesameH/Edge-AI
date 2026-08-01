@@ -192,3 +192,103 @@ class TestConstrainedGeneration:
         })
         _, calls = interpret_output(self._generate(constrained_model, plan, 'What time is it?'), plan)
         assert calls[0]['function']['name'] == 'get_time'
+
+
+# ---------------------------------------------------------------------------
+# parallel_tool_calls
+# ---------------------------------------------------------------------------
+
+
+def _weather_and_time() -> list[dict]:
+    return [
+        {
+            'type': 'function',
+            'function': {
+                'name': 'get_weather',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {'city': {'type': 'string'}},
+                    'required': ['city'],
+                },
+            },
+        },
+        {
+            'type': 'function',
+            'function': {
+                'name': 'get_time',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {'zone': {'type': 'string'}},
+                    'required': ['zone'],
+                },
+            },
+        },
+    ]
+
+
+def test_one_call_per_turn_is_still_the_default():
+    """The hosted API defaults parallel_tool_calls to true; this defaults to
+    false, because a wrong extra call is one the caller actually runs."""
+    plan = parse_tool_request({'tools': _weather_and_time()})
+    assert plan.parallel is False
+    assert 'tool_calls' not in json.dumps(plan.schema())
+
+
+def test_asking_for_parallel_calls_changes_the_grammar():
+    plan = parse_tool_request({'tools': _weather_and_time(), 'parallel_tool_calls': True})
+    assert plan.parallel is True
+    call_branch = plan.schema()['oneOf'][0]
+    array = call_branch['properties']['tool_calls']
+    assert array['type'] == 'array'
+    # An empty array must not be spellable: "no tools" is the text branch.
+    assert array['minItems'] == 1
+    assert {branch['properties']['name']['const'] for branch in array['items']['oneOf']} == {
+        'get_weather', 'get_time'
+    }
+
+
+def test_parallel_output_becomes_several_openai_calls():
+    plan = parse_tool_request({'tools': _weather_and_time(), 'parallel_tool_calls': True})
+    output = json.dumps({'tool_calls': [
+        {'name': 'get_weather', 'arguments': {'city': 'Taipei'}},
+        {'name': 'get_time', 'arguments': {'zone': 'Asia/Taipei'}},
+    ]})
+    content, calls = interpret_output(output, plan)
+    assert content is None
+    assert [call['function']['name'] for call in calls] == ['get_weather', 'get_time']
+    assert json.loads(calls[0]['function']['arguments']) == {'city': 'Taipei'}
+    # Distinct ids: the caller pairs results back by id.
+    assert calls[0]['id'] != calls[1]['id']
+
+
+def test_a_single_call_object_still_parses_under_a_parallel_plan():
+    """Nothing stops a model from answering in the older shape, and the older
+    shape is still a valid, executable call."""
+    plan = parse_tool_request({'tools': _weather_and_time(), 'parallel_tool_calls': True})
+    content, calls = interpret_output(
+        json.dumps({'name': 'get_time', 'arguments': {'zone': 'UTC'}}), plan
+    )
+    assert content is None
+    assert len(calls) == 1
+
+
+def test_a_batch_naming_no_declared_tool_is_text_not_a_call():
+    plan = parse_tool_request({'tools': _weather_and_time(), 'parallel_tool_calls': True})
+    output = json.dumps({'tool_calls': [{'name': 'rm_rf', 'arguments': {}}]})
+    content, calls = interpret_output(output, plan)
+    assert calls is None
+    assert content == output
+
+
+def test_parallel_conflicts_with_a_named_tool_choice():
+    with pytest.raises(ValueError, match='named tool_choice'):
+        parse_tool_request({
+            'tools': _weather_and_time(),
+            'parallel_tool_calls': True,
+            'tool_choice': {'type': 'function', 'function': {'name': 'get_time'}},
+        })
+
+
+def test_parallel_tool_calls_must_be_a_boolean():
+    with pytest.raises(ValueError, match='must be a boolean'):
+        parse_tool_request({'tools': _weather_and_time(), 'parallel_tool_calls': 'yes'})

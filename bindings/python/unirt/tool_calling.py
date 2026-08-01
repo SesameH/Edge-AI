@@ -18,13 +18,18 @@ returned malformed JSON" failure mode to retry around.
     required  -- tool branches only, so the model must call something
     {"type": "function", ...} -- that one tool's branch alone
 
-Two things are deliberately narrower than the hosted API. Only one call is
-returned per turn: parallel calls need the model to plan a whole batch before
-seeing any result, which is exactly what small models are worst at. And the
-tool definitions are rendered into a system message here rather than passed to
-the chat template, because ``llama_chat_apply_template`` has no tools parameter
-(see ``llm.cpp``) and the MLX backend has no tool-aware template either -- doing
-it in the prompt is the only thing that behaves identically on both backends.
+``parallel_tool_calls`` decides whether a turn may return more than one call.
+It defaults to **false** here where the hosted API defaults to true, because
+several calls at once means planning a whole batch before seeing any result,
+which is what small models are worst at -- and a wrong second call is a tool
+the caller actually executes. Clients that want it ask for it, and then the
+grammar accepts ``{"tool_calls": [...]}`` instead of a bare call object.
+
+The tool definitions are rendered into a system message here rather than passed
+to the chat template, because ``llama_chat_apply_template`` has no tools
+parameter (see ``llm.cpp``) and the MLX backend has no tool-aware template
+either -- doing it in the prompt is the only thing that behaves identically on
+both backends.
 """
 
 from __future__ import annotations
@@ -53,10 +58,10 @@ class ToolPlan:
     tools: tuple[dict, ...]
     forced_name: str | None
     must_call: bool
+    parallel: bool = False
 
-    def schema(self) -> dict:
-        """The JSON schema that constrains this turn's output."""
-        branches = [
+    def _call_branches(self) -> list[dict]:
+        return [
             {
                 'type': 'object',
                 'properties': {
@@ -69,6 +74,22 @@ class ToolPlan:
             for tool in self.tools
             if self.forced_name is None or tool['name'] == self.forced_name
         ]
+
+    def schema(self) -> dict:
+        """The JSON schema that constrains this turn's output."""
+        branches = self._call_branches()
+        if self.parallel:
+            # minItems 1 so "called nothing" cannot be spelled as an empty
+            # array; that is what the text branch is for.
+            item = branches[0] if len(branches) == 1 else {'oneOf': branches}
+            branches = [{
+                'type': 'object',
+                'properties': {
+                    'tool_calls': {'type': 'array', 'items': item, 'minItems': 1},
+                },
+                'required': ['tool_calls'],
+                'additionalProperties': False,
+            }]
         if not self.must_call:
             branches.append({
                 'type': 'object',
@@ -88,10 +109,17 @@ class ToolPlan:
             lines.append(f'- {tool["name"]}: {description}')
             lines.append(f'  parameters: {json.dumps(tool["parameters"])}')
         lines.append('')
-        lines.append(
-            'Reply with a single JSON object and nothing else. To call a tool, use '
-            '{"name": "<tool name>", "arguments": {...}}.'
-        )
+        if self.parallel:
+            lines.append(
+                'Reply with a single JSON object and nothing else. To call tools, use '
+                '{"tool_calls": [{"name": "<tool name>", "arguments": {...}}, ...]}. '
+                'Only include a call whose result you need before you can answer.'
+            )
+        else:
+            lines.append(
+                'Reply with a single JSON object and nothing else. To call a tool, use '
+                '{"name": "<tool name>", "arguments": {...}}.'
+            )
         if not self.must_call:
             lines.append(
                 f'To answer the user directly instead, use '
@@ -174,7 +202,13 @@ def parse_tool_request(req: dict) -> ToolPlan | None:
     forced_name, must_call, enabled = _parse_tool_choice(req.get('tool_choice'), names)
     if not enabled:
         return None
-    return ToolPlan(tuple(normalized), forced_name, must_call)
+    parallel = req.get('parallel_tool_calls', False)
+    if not isinstance(parallel, bool):
+        raise ValueError('parallel_tool_calls must be a boolean')
+    if parallel and forced_name is not None:
+        # tool_choice named one tool; asking for several at once contradicts it.
+        raise ValueError('parallel_tool_calls cannot be combined with a named tool_choice')
+    return ToolPlan(tuple(normalized), forced_name, must_call, parallel)
 
 
 def rewrite_tool_history(messages: list) -> list:
@@ -234,6 +268,18 @@ def apply_tool_prompt(messages: list, plan: ToolPlan) -> list:
     return [{'role': 'system', 'content': plan.system_prompt()}, *messages]
 
 
+def _tool_call(payload: dict, declared: set[str]) -> dict | None:
+    """One call object in OpenAI's shape, or None if it does not name a tool."""
+    name = payload.get('name')
+    if not isinstance(name, str) or name not in declared:
+        return None
+    return {
+        'id': 'call_' + uuid.uuid4().hex[:24],
+        'type': 'function',
+        'function': {'name': name, 'arguments': json.dumps(payload.get('arguments', {}))},
+    }
+
+
 def interpret_output(text: str, plan: ToolPlan) -> tuple[str | None, list[dict] | None]:
     """Split constrained output into (content, tool_calls).
 
@@ -251,12 +297,18 @@ def interpret_output(text: str, plan: ToolPlan) -> tuple[str | None, list[dict] 
     if _TEXT_BRANCH_KEY in payload and 'name' not in payload:
         content = payload[_TEXT_BRANCH_KEY]
         return (content if isinstance(content, str) else text), None
-    name = payload.get('name')
-    if not isinstance(name, str) or name not in {tool['name'] for tool in plan.tools}:
-        return text, None
-    arguments = payload.get('arguments', {})
-    return None, [{
-        'id': 'call_' + uuid.uuid4().hex[:24],
-        'type': 'function',
-        'function': {'name': name, 'arguments': json.dumps(arguments)},
-    }]
+
+    declared = {tool['name'] for tool in plan.tools}
+    batch = payload.get('tool_calls')
+    if isinstance(batch, list):
+        calls = [
+            call
+            for item in batch
+            if isinstance(item, dict) and (call := _tool_call(item, declared)) is not None
+        ]
+        # An empty batch is not "no tools" -- the grammar has a text branch for
+        # that -- it is output that got cut off, so surface it as text.
+        return (None, calls) if calls else (text, None)
+
+    call = _tool_call(payload, declared)
+    return (None, [call]) if call is not None else (text, None)
