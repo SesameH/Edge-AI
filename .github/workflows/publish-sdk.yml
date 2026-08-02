@@ -8,6 +8,11 @@ name: Publish SDK
 on:
   push:
     tags: ['v*']
+  # A dry run: builds and smoke-tests every platform exactly as a tag would,
+  # and stops before the two jobs that publish anything. The wiring in here is
+  # otherwise only ever exercised by cutting a release, which is a bad moment
+  # to find out that a build flag does not survive the manylinux toolchain.
+  workflow_dispatch:
 
 env:
   UNIRT_SDK_REPO: SesameH/unirt-sdk
@@ -20,8 +25,33 @@ env:
   GGUF_URL: https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
 
 jobs:
+  version:
+    name: Resolve the version being built
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      # Without the "v", which is what a wheel filename and UNIRT_VERSION want.
+      number: ${{ steps.pick.outputs.number }}
+      # With it: the tag to create on unirt-sdk.
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - id: pick
+        # On a tag, the tag. On a dry run there is no version being released,
+        # and inventing one that looks real is how a dry-run wheel ends up
+        # somewhere it should not be -- so it is plainly 0.0.0.dev0.
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=0.0.0.dev0" >> "$GITHUB_OUTPUT"
+            echo "tag=v0.0.0.dev0" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$GITHUB_OUTPUT"
+
   build-macos-ios:
     name: Build macOS (Python) + iOS XCFramework
+    needs: version
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
@@ -63,7 +93,7 @@ jobs:
           cmake -S sdk -B build -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.MACOS_DEPLOYMENT_TARGET }}
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          -DUNIRT_VERSION=${{ github.ref_name }}
+          -DUNIRT_VERSION=${{ needs.version.outputs.number }}
           -DUNIRT_ONNXRUNTIME_ROOT="$PWD/build-onnxruntime/onnxruntime-osx-arm64-${ORT_VERSION}" &&
           cmake --build build -j4 &&
           cmake --install build --prefix sdk/pkg-unirt
@@ -91,7 +121,7 @@ jobs:
           python3 -m pip install --quiet build wheel
           python3 bindings/python/build_wheel.py \
             --native-prefix sdk/pkg-unirt \
-            --version "${GITHUB_REF_NAME#v}" \
+            --version "${{ needs.version.outputs.number }}" \
             --platform-tag "${MACOS_PLATFORM_TAG}" \
             --output-dir publish
           # The tag names a minimum macOS; nothing else checks the binaries
@@ -103,14 +133,14 @@ jobs:
       - name: Build UniRT.xcframework
         run: >
           cmake -S bindings/ios/framework -B build-ios-framework-sim -DCMAKE_BUILD_TYPE=Release
-          -DUNIRT_VERSION=${{ github.ref_name }}
+          -DUNIRT_VERSION=${{ needs.version.outputs.number }}
           -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator
           -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0
           -DGGML_METAL=OFF -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache &&
           cmake --build build-ios-framework-sim -j4 &&
           cmake -S bindings/ios/framework -B build-ios-framework-device -DCMAKE_BUILD_TYPE=Release
-          -DUNIRT_VERSION=${{ github.ref_name }}
+          -DUNIRT_VERSION=${{ needs.version.outputs.number }}
           -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos
           -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0
           -DGGML_METAL=OFF -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
@@ -151,6 +181,7 @@ jobs:
             arch: aarch64
             platform_tag: manylinux_2_31_aarch64
             ort_arch: linux-aarch64
+    needs: version
     runs-on: ${{ matrix.runner }}
     container:
       image: ${{ matrix.image }}
@@ -194,7 +225,7 @@ jobs:
         run: |
           cmake -S sdk -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DUNIRT_VERSION="${GITHUB_REF_NAME}" \
+            -DUNIRT_VERSION="${{ needs.version.outputs.number }}" \
             -DUNIRT_PLUGIN_MLX=OFF \
             -DUNIRT_LLAMA_VULKAN=ON \
             -DUNIRT_LLAMA_CPU_VARIANTS=ON \
@@ -250,7 +281,7 @@ jobs:
           set -e
           python bindings/python/build_wheel.py \
             --native-prefix sdk/pkg-unirt \
-            --version "${GITHUB_REF_NAME#v}" \
+            --version "${{ needs.version.outputs.number }}" \
             --platform-tag "${{ matrix.platform_tag }}" \
             --output-dir publish
           # The platform tag is stamped by hand above, so nothing so far has
@@ -413,6 +444,7 @@ jobs:
               -DCMAKE_TOOLCHAIN_FILE=../third-party/llama.cpp/cmake/arm64-windows-llvm.cmake
               "-DCMAKE_C_FLAGS=--target=arm64-pc-windows-msvc -march=armv8.7-a"
               "-DCMAKE_CXX_FLAGS=--target=arm64-pc-windows-msvc -march=armv8.7-a"
+    needs: version
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     steps:
@@ -442,7 +474,7 @@ jobs:
       - name: Build + install native runtime
         run: >
           cmake -S sdk -B build ${{ matrix.cmake_flags }}
-          -DUNIRT_VERSION=${{ github.ref_name }}
+          -DUNIRT_VERSION=${{ needs.version.outputs.number }}
           -DUNIRT_PLUGIN_MLX=OFF
           -DUNIRT_LLAMA_CPU_VARIANTS=${{ matrix.cpu_variants }}
           -DUNIRT_ONNXRUNTIME_ROOT="${{ github.workspace }}/build-onnxruntime/onnxruntime-${{ matrix.ort_arch }}-${{ env.ORT_VERSION }}"
@@ -454,7 +486,7 @@ jobs:
           cmake --install build --config Release --prefix sdk/pkg-unirt
       - name: Build + inspect + smoke-test wheel
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $version = "${{ needs.version.outputs.number }}"
           python bindings/python/build_wheel.py `
             --native-prefix sdk/pkg-unirt `
             --version $version `
@@ -519,9 +551,13 @@ jobs:
 
   publish:
     name: Sync wrapper source + release on unirt-sdk
+    # Never on a dry run: everything above it builds and is smoke-tested, and
+    # then nothing leaves this repository. A dispatch that could still push to
+    # unirt-sdk or PyPI would not be a dry run.
+    if: github.event_name == 'push'
     needs:
-      [build-macos-ios, build-python-linux, build-python-windows, build-android,
-       smoke-linux, smoke-linux-vulkan]
+      [version, build-macos-ios, build-python-linux, build-python-windows,
+       build-android, smoke-linux, smoke-linux-vulkan]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -582,7 +618,7 @@ jobs:
           git config user.name "unirt-sdk-bot"
           git config user.email "actions@github.com"
           git add -A
-          git diff --cached --quiet || git commit -m "sync wrapper source from core ${{ github.ref_name }}"
+          git diff --cached --quiet || git commit -m "sync wrapper source from core ${{ needs.version.outputs.tag }}"
           git push
       - name: Assemble the real Android AAR (not raw .so files — see android/README.md)
         run: |
@@ -608,10 +644,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.UNIRT_SDK_PUSH_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" \
+          gh release create "${{ needs.version.outputs.tag }}" \
             --repo "${{ env.UNIRT_SDK_REPO }}" \
-            --title "${{ github.ref_name }}" \
-            --notes "Prebuilt native libraries for UniRT ${{ github.ref_name }}. See README.md for install instructions per platform." \
+            --title "${{ needs.version.outputs.tag }}" \
+            --notes "Prebuilt native libraries for UniRT ${{ needs.version.outputs.tag }}. See README.md for install instructions per platform." \
             release-assets/unirt-python-native-macos-arm64.tar.gz \
             release-assets/unirt-android.aar \
             release-assets/unirt-ios-xcframework.zip \
@@ -623,7 +659,7 @@ jobs:
     # trusted publishing is configured (pypi.org -> project unirt -> add
     # publisher: SesameH/Edge-AI, workflow publish-sdk.yml). Then set the
     # repository variable PYPI_PUBLISH=true.
-    if: vars.PYPI_PUBLISH == 'true'
+    if: github.event_name == 'push' && vars.PYPI_PUBLISH == 'true'
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 10

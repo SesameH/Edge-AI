@@ -81,3 +81,35 @@ def test_job_dependencies_exist(path):
         needs = job.get('needs', [])
         for required in [needs] if isinstance(needs, str) else needs:
             assert required in jobs, f'{path.name}: job {name} needs missing job {required}'
+
+
+PUBLISHING_MARKERS = ('gh-action-pypi-publish', 'gh release create', 'git push')
+
+
+@pytest.mark.parametrize('path', WORKFLOWS, ids=lambda p: p.name)
+def test_a_hand_dispatched_run_cannot_publish(path):
+    """A workflow that can be dispatched by hand must not publish when it is.
+
+    publish-sdk.yml exists to be triggered by a tag, but its build wiring --
+    Vulkan, the CPU variants, manylinux -- is then only ever exercised while
+    cutting a release, which is a bad moment to discover a broken flag. It
+    takes workflow_dispatch so it can be dry-run. That is only a dry run if
+    every job that leaves the repository stays behind a tag push.
+    """
+    import json
+
+    workflow = _load(path)
+    triggers = workflow[True]
+    if 'workflow_dispatch' not in triggers:
+        pytest.skip(f'{path.name} cannot be dispatched by hand')
+
+    for name, job in workflow['jobs'].items():
+        body = json.dumps(job)
+        marker = next((m for m in PUBLISHING_MARKERS if m in body), None)
+        if marker is None:
+            continue
+        condition = job.get('if', '')
+        assert "github.event_name == 'push'" in condition, (
+            f"{path.name}: job {name} runs {marker!r} but is not gated on a tag "
+            f"push, so a hand-dispatched dry run would publish (if: {condition!r})"
+        )
