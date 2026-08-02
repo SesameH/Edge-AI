@@ -187,6 +187,24 @@ needs, and the published Linux and Windows-x64 wheels have it on. Off by
 default: it multiplies the CPU backend's build time by the number of levels,
 and adds their size to the install.
 
+What it buys, measured on aarch64 by leaving exactly one variant in the
+directory ggml searches and alternating between them (same build, same layout,
+best of three per run, three rounds — a VM on a laptop is noisy, and
+interference can only slow a run down):
+
+| | prefill | decode |
+|---|---|---|
+| `armv8.0_1` (the baseline this replaces) | 408 tok/s | 112 tok/s |
+| `armv8.2_2` (DOTPROD + FP16, what an M1 loads) | **820 tok/s** | **142 tok/s** |
+
+Prefill doubles; decode gains 26%. The split is the point — decode is bound by
+reading the weights and barely cares which instructions do the arithmetic,
+while prefill is compute-bound and is where a wider instruction set lands. The
+x86-64 gap (SSE2 against AVX2/FMA) is the same shape.
+
+The cost is size: eight variants take the aarch64 `lib/llama_cpp` from 13 MB
+to 20 MB, and x86-64 has fourteen of them.
+
 Which one was chosen is in the plugin's debug log (`UNIRT_LOG=debug`), as the
 feature list of the backend that registered:
 
