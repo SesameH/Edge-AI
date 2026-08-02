@@ -45,6 +45,13 @@ option(UNIRT_PLUGIN_ONNXRUNTIME "Enable ONNX Runtime embedding backend" ON)
 # Linux release job turns it on. See plugins/llama_cpp/CMakeLists.txt for why
 # it also implies GGML_BACKEND_DL.
 option(UNIRT_LLAMA_VULKAN      "Build the llama.cpp backend with Vulkan" OFF)
+# A shipped binary cannot be built for the machine that built it, so the CPU
+# backend is otherwise the target's baseline -- SSE2 on x86-64, with no AVX2.
+# This builds one CPU backend per instruction-set level and lets ggml pick the
+# best the running machine supports. Off by default because it multiplies both
+# build time and installed size; the release jobs turn it on. See
+# plugins/llama_cpp/CMakeLists.txt.
+option(UNIRT_LLAMA_CPU_VARIANTS "Build one llama.cpp CPU backend per instruction-set level" OFF)
 option(UNIRT_BENCHMARK         "Build benchmark example"        OFF)
 option(UNIRT_PYTHON_TESTS      "Register Python architecture tests with CTest" ON)
 option(UNIRT_NATIVE_TESTS      "Build native validation tests"   ON)
@@ -71,6 +78,7 @@ message(STATUS "UNIRT_PLUGIN_LLAMA_CPP: ${UNIRT_PLUGIN_LLAMA_CPP}")
 message(STATUS "UNIRT_PLUGIN_MLX:       ${UNIRT_PLUGIN_MLX}")
 message(STATUS "UNIRT_PLUGIN_ONNXRUNTIME: ${UNIRT_PLUGIN_ONNXRUNTIME}")
 message(STATUS "UNIRT_LLAMA_VULKAN:     ${UNIRT_LLAMA_VULKAN}")
+message(STATUS "UNIRT_LLAMA_CPU_VARIANTS: ${UNIRT_LLAMA_CPU_VARIANTS}")
 message(STATUS "UNIRT_BENCHMARK:        ${UNIRT_BENCHMARK}")
 message(STATUS "=======================================")
 

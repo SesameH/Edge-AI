@@ -98,9 +98,10 @@ jobs:
     name: Linux x64 (llama_cpp + Vulkan)
     runs-on: ubuntu-latest
     # ggml-vulkan is ~420 shader translation units plus one very large
-    # ggml-vulkan.cpp; a cold ccache takes most of an hour on 4 cores, a warm
-    # one takes minutes.
-    timeout-minutes: 120
+    # ggml-vulkan.cpp, and the CPU backend is compiled once per
+    # instruction-set level; a cold ccache takes well over an hour on 4 cores,
+    # a warm one takes minutes.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - name: Fetch llama.cpp submodule
@@ -125,6 +126,7 @@ jobs:
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DUNIRT_PLUGIN_MLX=OFF -DUNIRT_PLUGIN_ONNXRUNTIME=OFF
           -DUNIRT_LLAMA_VULKAN=ON
+          -DUNIRT_LLAMA_CPU_VARIANTS=ON
       - name: Build
         run: cmake --build build -j4
       - name: Install
@@ -171,6 +173,14 @@ jobs:
           python -m pip install -e bindings/python pytest
       - name: Run tests
         run: python -m pytest tests/python -q
+      - name: The CPU backend that loads must be built for this machine
+        # The release wheels ship one CPU backend per instruction-set level
+        # because a portable binary otherwise runs every machine at the
+        # architecture baseline -- no AVX2 at all on x86-64. Checked here and
+        # not only at tag time: this runner is a real AVX2 machine, so a
+        # dispatch that fell back to the baseline shows up on the push that
+        # broke it.
+        run: python bindings/python/smoke_cpu_variant_wheel.py sdk/pkg-unirt/lib/llama_cpp
       - name: Decode on the Vulkan device
         # ggml-vulkan refuses PHYSICAL_DEVICE_TYPE_CPU devices when it picks for
         # itself -- correct, since a software rasterizer loses to the CPU

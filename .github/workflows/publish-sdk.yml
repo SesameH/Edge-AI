@@ -154,9 +154,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container:
       image: ${{ matrix.image }}
-    # Building glslc (cached) and then all of ggml-vulkan's shader translation
-    # units, with no ccache in this job at all.
-    timeout-minutes: 150
+    # Building glslc (cached), then all of ggml-vulkan's shader translation
+    # units, then the CPU backend once per instruction-set level -- with no
+    # ccache in this job at all.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - name: Trust the workspace (container job)
@@ -196,6 +197,7 @@ jobs:
             -DUNIRT_VERSION="${GITHUB_REF_NAME}" \
             -DUNIRT_PLUGIN_MLX=OFF \
             -DUNIRT_LLAMA_VULKAN=ON \
+            -DUNIRT_LLAMA_CPU_VARIANTS=ON \
             -DCMAKE_PREFIX_PATH="$PWD/vulkan-toolchain" \
             -DVulkan_GLSLC_EXECUTABLE="$PWD/vulkan-toolchain/bin/glslc" \
             -DUNIRT_ONNXRUNTIME_ROOT="$PWD/build-onnxruntime/onnxruntime-${{ matrix.ort_arch }}-${ORT_VERSION}" \
@@ -208,14 +210,23 @@ jobs:
             test -f "sdk/pkg-unirt/lib/$runtime/libunirt_plugin.so" \
               || { echo "::error::$runtime plugin missing from the install prefix"; exit 1; }
           done
-          # A Vulkan build makes every ggml backend a separate loadable module.
-          # Losing the CPU one leaves a wheel with no backend at all; losing the
-          # Vulkan one silently downgrades every GPU machine to CPU. Neither
-          # shows up as a build failure.
-          for backend in cpu vulkan; do
-            test -f "sdk/pkg-unirt/lib/llama_cpp/libggml-$backend.so" \
-              || { echo "::error::ggml $backend backend module missing from the install prefix"; exit 1; }
-          done
+          # This build makes every ggml backend a separate loadable module.
+          # Losing the CPU ones leaves a wheel with no backend at all; losing
+          # the Vulkan one silently downgrades every GPU machine to CPU.
+          # Neither shows up as a build failure.
+          test -f sdk/pkg-unirt/lib/llama_cpp/libggml-vulkan.so \
+            || { echo "::error::ggml vulkan backend module missing from the install prefix"; exit 1; }
+          # With UNIRT_LLAMA_CPU_VARIANTS the CPU backend is not one file but
+          # one per instruction-set level, named for the level rather than
+          # "cpu" -- so count them instead, and refuse a build that quietly
+          # fell back to a single baseline backend for every machine.
+          variants=$(ls sdk/pkg-unirt/lib/llama_cpp/libggml-cpu-*.so 2>/dev/null | wc -l)
+          if [ "$variants" -lt 2 ]; then
+            echo "::error::found $variants CPU backend variants; CPU dispatch did not get built"
+            exit 1
+          fi
+          echo "$variants CPU backend variants installed"
+          ls sdk/pkg-unirt/lib/llama_cpp/libggml-cpu-*.so
       - name: The plugin itself must not depend on the Vulkan loader
         # Why the backends are modules at all: libvulkan.so.1 exists only where
         # a Vulkan driver is installed. A plugin that names it as a hard
@@ -305,6 +316,13 @@ jobs:
           smoke/bin/unirt devices
           smoke/bin/python bindings/python/smoke_inference_wheel.py \
             models/SmolLM2-135M-Instruct-Q8_0.gguf
+      - name: The CPU backend that loads must be built for this machine
+        # The wheel has to run on every CPU of its architecture, so its
+        # baseline backend has no AVX2 at all. Shipping the variants is half
+        # the feature; this checks the other half -- that the loaded one is
+        # not the baseline.
+        run: |
+          smoke/bin/python bindings/python/smoke_cpu_variant_wheel.py
       - name: A machine with no Vulkan driver must lose only Vulkan
         # bullseye-slim has no Vulkan loader, which makes it the exact
         # environment the loadable-module layout exists for: libggml-vulkan.so
@@ -380,11 +398,16 @@ jobs:
             arch: x64
             platform_tag: win_amd64
             ort_arch: win-x64
+            # One CPU backend per instruction-set level. Not on win_arm64
+            # below: ggml defines no ARM-on-Windows variant set, and that
+            # build already targets armv8.7-a explicitly.
+            cpu_variants: 'ON'
             cmake_flags: -G Ninja -DCMAKE_BUILD_TYPE=Release
           - runner: windows-11-arm
             arch: arm64
             platform_tag: win_arm64
             ort_arch: win-arm64
+            cpu_variants: 'OFF'
             cmake_flags: >-
               -G "Ninja Multi-Config"
               -DCMAKE_TOOLCHAIN_FILE=../third-party/llama.cpp/cmake/arm64-windows-llvm.cmake
@@ -421,6 +444,7 @@ jobs:
           cmake -S sdk -B build ${{ matrix.cmake_flags }}
           -DUNIRT_VERSION=${{ github.ref_name }}
           -DUNIRT_PLUGIN_MLX=OFF
+          -DUNIRT_LLAMA_CPU_VARIANTS=${{ matrix.cpu_variants }}
           -DUNIRT_ONNXRUNTIME_ROOT="${{ github.workspace }}/build-onnxruntime/onnxruntime-${{ matrix.ort_arch }}-${{ env.ORT_VERSION }}"
           -DUNIRT_NATIVE_TESTS=OFF
           -DUNIRT_PYTHON_TESTS=OFF
@@ -451,6 +475,10 @@ jobs:
           & wheel-smoke\Scripts\python -m pip install --quiet huggingface_hub tokenizers tqdm
           Invoke-WebRequest -Uri $env:GGUF_URL -OutFile smoke-model.gguf
           & wheel-smoke\Scripts\python bindings/python/smoke_inference_wheel.py smoke-model.gguf
+      - name: The CPU backend that loads must be built for this machine
+        if: matrix.arch == 'x64'
+        run: |
+          & wheel-smoke\Scripts\python bindings/python/smoke_cpu_variant_wheel.py
       - uses: actions/upload-artifact@v4
         with:
           name: publish-wheel-windows-${{ matrix.arch }}

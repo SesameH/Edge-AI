@@ -51,6 +51,27 @@ std::filesystem::path plugin_directory() {
 #endif
 }
 
+// The instruction-set features the loaded backend was compiled for, as
+// "AVX2=1 FMA=1 ...". With one CPU backend per level shipped and ggml picking
+// at load time, this is the only way a user can tell which one they got --
+// and the first thing to ask when inference is slower than the same machine
+// manages elsewhere. Empty when the backend does not report features.
+std::string backend_features(ggml_backend_reg_t reg) {
+    auto get_features = reinterpret_cast<ggml_backend_get_features_t>(
+        ggml_backend_reg_get_proc_address(reg, "ggml_backend_get_features"));
+    if (!get_features) return {};
+    std::string listed;
+    for (auto* feature = get_features(reg); feature && feature->name; ++feature) {
+        if (!listed.empty()) listed += ' ';
+        listed += feature->name;
+        if (feature->value && *feature->value) {
+            listed += '=';
+            listed += feature->value;
+        }
+    }
+    return listed;
+}
+
 }  // namespace
 
 void load_ggml_backend_modules() {
@@ -73,9 +94,12 @@ void load_ggml_backend_modules() {
         // why their device list came back with just the CPU on it.
         std::string names;
         for (size_t index = 0; index < ggml_backend_reg_count(); ++index) {
-            const char* name = ggml_backend_reg_name(ggml_backend_reg_get(index));
+            ggml_backend_reg_t reg  = ggml_backend_reg_get(index);
+            const char*        name = ggml_backend_reg_name(reg);
             if (!names.empty()) names += ", ";
             names += name ? name : "?";
+            const std::string features = backend_features(reg);
+            if (!features.empty()) names += " (" + features + ")";
         }
         UNIRT_LOG_DEBUG(
             "llama_cpp: ggml backends registered from {}: {}",

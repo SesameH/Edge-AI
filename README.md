@@ -170,6 +170,34 @@ directory at load time, so the installed tree stays relocatable.
 A machine with no Vulkan device runs on the CPU with no configuration.
 `unirt devices` lists what was actually found.
 
+### CPU instruction-set dispatch
+
+A binary that has to run on every CPU of its architecture can only be built
+for that architecture's baseline: SSE2 on x86-64, plain armv8-a on aarch64.
+No AVX2, no FMA, no dotprod — on hardware that has had them for a decade.
+Nothing about it looks broken, which is the problem: inference runs, just
+slower than the same machine manages elsewhere.
+
+`-DUNIRT_LLAMA_CPU_VARIANTS=ON` builds one CPU backend per instruction-set
+level instead (`libggml-cpu-haswell.so`, `libggml-cpu-zen4.so`, … on x86-64;
+`libggml-cpu-armv8.2_1.so` and friends on aarch64) and ggml picks the
+highest-scoring one the running machine supports, at load time. Portable
+wheel, native speed. It rides on the same `GGML_BACKEND_DL` layout Vulkan
+needs, and the published Linux and Windows-x64 wheels have it on. Off by
+default: it multiplies the CPU backend's build time by the number of levels,
+and adds their size to the install.
+
+Which one was chosen is in the plugin's debug log (`UNIRT_LOG=debug`), as the
+feature list of the backend that registered:
+
+```
+llama_cpp: ggml backends registered from …/lib/llama_cpp:
+    CPU (SSE3=1 SSSE3=1 AVX=1 AVX2=1 F16C=1 FMA=1 BMI2=1 LLAMAFILE=1 REPACK=1)
+```
+
+Not supported for ARM on Windows, where ggml defines no variant set; that
+wheel targets armv8.7-a directly.
+
 ## Quick test
 
 ```sh
