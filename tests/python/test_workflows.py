@@ -113,3 +113,25 @@ def test_a_hand_dispatched_run_cannot_publish(path):
             f"{path.name}: job {name} runs {marker!r} but is not gated on a tag "
             f"push, so a hand-dispatched dry run would publish (if: {condition!r})"
         )
+
+
+def test_the_dry_run_version_is_one_the_wheel_builder_accepts():
+    """The dry run failed on this: it invented 0.0.0.dev0, and build_wheel.py
+    takes X.Y.Z only, so every wheel job died at packaging having already
+    built its native libraries. A dry run that cannot reach the packaging step
+    does not test the packaging step."""
+    import re
+    import sys
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(root / 'bindings' / 'python'))
+    import build_wheel
+
+    workflow = (root / '.github' / 'workflows' / 'publish-sdk.yml').read_text(encoding='utf-8')
+    fallbacks = re.findall(r'echo "number=([^"]+)" >> "\$GITHUB_OUTPUT"', workflow)
+    literals = [value for value in fallbacks if '$' not in value]
+    assert literals, 'the version job no longer has a literal fallback version'
+    for value in literals:
+        assert build_wheel._VERSION_RE.fullmatch(value), (
+            f'the workflow builds version {value!r}, which build_wheel.py rejects'
+        )
