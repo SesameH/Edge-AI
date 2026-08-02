@@ -97,10 +97,9 @@ int64_t Linear::nbytes() const {
     return total;
 }
 
-void LlamaModel::load(const std::string& model_dir, const LlamaConfig& cfg) {
-    cfg_ = cfg;
-    reset_cache();
-    weights_bytes_ = 0;
+LlamaWeights load_weights(const std::string& model_dir, const LlamaConfig& cfg) {
+    LlamaWeights out;
+    out.cfg = cfg;
 
     namespace fs = std::filesystem;
     const fs::path root = fs::path(model_dir);
@@ -254,21 +253,20 @@ void LlamaModel::load(const std::string& model_dir, const LlamaConfig& cfg) {
         }
     };
 
-    lm_head_ = make_linear("model.embed_tokens");
+    out.lm_head = make_linear("model.embed_tokens");
     // Embedding lookups need a dense table; dequantize once if necessary.
-    embed_ = lm_head_.is_quantized()
-                 ? mx::dequantize(lm_head_.w, *lm_head_.scales, lm_head_.biases,
-                                  lm_head_.group_size, lm_head_.bits)
-                 : lm_head_.w;
-    require_shape(embed_, "model.embed_tokens.weight", {cfg.vocab_size, cfg.hidden_size});
-    final_norm_ = get("model.norm.weight");
-    require_shape(final_norm_, "model.norm.weight", {cfg.hidden_size});
+    out.embed = out.lm_head.is_quantized()
+                    ? mx::dequantize(out.lm_head.w, *out.lm_head.scales, out.lm_head.biases,
+                                     out.lm_head.group_size, out.lm_head.bits)
+                    : out.lm_head.w;
+    require_shape(out.embed, "model.embed_tokens.weight", {cfg.vocab_size, cfg.hidden_size});
+    out.final_norm = get("model.norm.weight");
+    require_shape(out.final_norm, "model.norm.weight", {cfg.hidden_size});
 
-    layers_.clear();
-    layers_.resize(cfg.num_hidden_layers);
+    out.layers.resize(cfg.num_hidden_layers);
     for (int32_t i = 0; i < cfg.num_hidden_layers; ++i) {
-        const std::string p = "model.layers." + std::to_string(i) + ".";
-        Layer&            l = layers_[static_cast<size_t>(i)];
+        const std::string   p = "model.layers." + std::to_string(i) + ".";
+        LlamaWeights::Layer& l = out.layers[static_cast<size_t>(i)];
         l.wq             = make_linear(p + "self_attn.q_proj");
         l.wk             = make_linear(p + "self_attn.k_proj");
         l.wv             = make_linear(p + "self_attn.v_proj");
@@ -289,24 +287,33 @@ void LlamaModel::load(const std::string& model_dir, const LlamaConfig& cfg) {
         require_shape(l.input_norm, p + "input_layernorm.weight", {cfg.hidden_size});
         require_shape(l.post_attn_norm, p + "post_attention_layernorm.weight", {cfg.hidden_size});
     }
-    n_past_ = 0;
 
     // Materialize all weights now so create() pays the load cost, not the
-    // first generate().
+    // first generate() -- and so that what is shared between slots is data
+    // rather than an unevaluated graph two threads might race to evaluate.
     std::vector<mx::array> all;
     for (auto& [k, v] : weights) all.push_back(v);
-    all.push_back(embed_);
+    all.push_back(out.embed);
     mx::eval(all);
 
-    weights_bytes_ = static_cast<int64_t>(embed_.nbytes());
-    if (lm_head_.is_quantized()) weights_bytes_ += lm_head_.nbytes();
-    weights_bytes_ += static_cast<int64_t>(final_norm_.nbytes());
-    for (auto& l : layers_) {
-        weights_bytes_ += l.wq.nbytes() + l.wk.nbytes() + l.wv.nbytes() + l.wo.nbytes() +
-                          l.w_gate.nbytes() + l.w_up.nbytes() + l.w_down.nbytes() +
-                          static_cast<int64_t>(l.input_norm.nbytes()) +
-                          static_cast<int64_t>(l.post_attn_norm.nbytes());
+    out.bytes = static_cast<int64_t>(out.embed.nbytes());
+    if (out.lm_head.is_quantized()) out.bytes += out.lm_head.nbytes();
+    out.bytes += static_cast<int64_t>(out.final_norm.nbytes());
+    for (auto& l : out.layers) {
+        out.bytes += l.wq.nbytes() + l.wk.nbytes() + l.wv.nbytes() + l.wo.nbytes() +
+                     l.w_gate.nbytes() + l.w_up.nbytes() + l.w_down.nbytes() +
+                     static_cast<int64_t>(l.input_norm.nbytes()) +
+                     static_cast<int64_t>(l.post_attn_norm.nbytes());
     }
+    return out;
+}
+
+void LlamaModel::load(const std::string& model_dir, const LlamaConfig& cfg) {
+    weights_ = acquire_weights(model_dir, cfg);
+    cache_.assign(weights_->layers.size(), LayerCache{});
+    n_past_       = 0;
+    max_capacity_ = 0;
+    allocated_    = 0;
 }
 
 namespace {
@@ -317,9 +324,9 @@ void LlamaModel::reserve_cache(int32_t max_capacity) {
     if (max_capacity <= 0) throw std::invalid_argument("cache capacity must be positive");
     max_capacity_ = max_capacity;
     allocated_    = 0;
-    for (auto& l : layers_) {
-        l.k_cache.reset();
-        l.v_cache.reset();
+    for (auto& entry : cache_) {
+        entry.k.reset();
+        entry.v.reset();
     }
     n_past_ = 0;
 }
@@ -331,17 +338,19 @@ int64_t LlamaModel::kv_cache_bytes() const {
     // data for the current transcript; scale by the in-use fraction.
     if (allocated_ <= 0) return 0;
     int64_t total = 0;
-    for (const auto& l : layers_) {
-        if (l.k_cache) total += static_cast<int64_t>(l.k_cache->nbytes()) * n_past_ / allocated_;
-        if (l.v_cache) total += static_cast<int64_t>(l.v_cache->nbytes()) * n_past_ / allocated_;
+    for (const auto& entry : cache_) {
+        if (entry.k) total += static_cast<int64_t>(entry.k->nbytes()) * n_past_ / allocated_;
+        if (entry.v) total += static_cast<int64_t>(entry.v->nbytes()) * n_past_ / allocated_;
     }
     return total;
 }
 
 std::vector<float> LlamaModel::forward_logits(const std::vector<int32_t>& tokens) {
     if (tokens.empty()) throw std::invalid_argument("forward_logits requires at least one token");
+    if (!weights_) throw std::runtime_error("forward_logits called before load");
+    const LlamaConfig& cfg = weights_->cfg;
     for (int32_t token : tokens) {
-        if (token < 0 || token >= cfg_.vocab_size) {
+        if (token < 0 || token >= cfg.vocab_size) {
             throw std::out_of_range("token id is outside the model vocabulary");
         }
     }
@@ -352,9 +361,9 @@ std::vector<float> LlamaModel::forward_logits(const std::vector<int32_t>& tokens
     if (n_past_ + T > max_capacity_) {
         throw std::out_of_range("forward_logits would exceed the reserved KV cache capacity");
     }
-    const int32_t n_heads  = cfg_.num_attention_heads;
-    const int32_t n_kv     = cfg_.num_key_value_heads;
-    const int32_t head_dim = cfg_.hidden_size / n_heads;
+    const int32_t n_heads  = cfg.num_attention_heads;
+    const int32_t n_kv     = cfg.num_key_value_heads;
+    const int32_t head_dim = cfg.hidden_size / n_heads;
 
     // Grow the physical buffer by doubling (capped at max_capacity_) rather
     // than allocating the whole ceiling up front — most steps just write
@@ -368,11 +377,13 @@ std::vector<float> LlamaModel::forward_logits(const std::vector<int32_t>& tokens
     }
 
     mx::array ids = mx::array(tokens.data(), {1, T}, mx::int32);
-    mx::array x   = mx::take(embed_, ids, 0);  // [1, T, H]
+    mx::array x   = mx::take(weights_->embed, ids, 0);  // [1, T, H]
 
-    for (auto& l : layers_) {
+    for (size_t index = 0; index < weights_->layers.size(); ++index) {
+        const LlamaWeights::Layer& l = weights_->layers[index];
+        LayerCache&                c = cache_[index];
         // ---- attention ----
-        mx::array h = mx::fast::rms_norm(x, l.input_norm, cfg_.rms_norm_eps);
+        mx::array h = mx::fast::rms_norm(x, l.input_norm, cfg.rms_norm_eps);
 
         mx::array q = l.wq.apply(h);
         mx::array k = l.wk.apply(h);
@@ -382,35 +393,33 @@ std::vector<float> LlamaModel::forward_logits(const std::vector<int32_t>& tokens
         k = mx::transpose(mx::reshape(k, {1, T, n_kv, head_dim}), {0, 2, 1, 3});
         v = mx::transpose(mx::reshape(v, {1, T, n_kv, head_dim}), {0, 2, 1, 3});
 
-        q = mx::fast::rope(q, head_dim, /*traditional=*/false, cfg_.rope_theta, /*scale=*/1.f, n_past_);
-        k = mx::fast::rope(k, head_dim, /*traditional=*/false, cfg_.rope_theta, /*scale=*/1.f, n_past_);
+        q = mx::fast::rope(q, head_dim, /*traditional=*/false, cfg.rope_theta, /*scale=*/1.f, n_past_);
+        k = mx::fast::rope(k, head_dim, /*traditional=*/false, cfg.rope_theta, /*scale=*/1.f, n_past_);
 
-        if (!l.k_cache) {
+        if (!c.k) {
             // First write since load()/reserve_cache()/reset_cache().
             const mx::Shape full_shape{1, n_kv, new_capacity, head_dim};
-            l.k_cache = mx::zeros(full_shape, k.dtype());
-            l.v_cache = mx::zeros(full_shape, v.dtype());
+            c.k = mx::zeros(full_shape, k.dtype());
+            c.v = mx::zeros(full_shape, v.dtype());
         } else if (new_capacity > allocated_) {
             // Doubling event: reallocate at the new size and copy forward
             // only the valid prefix (garbage past n_past_ is never read).
             const mx::Shape full_shape{1, n_kv, new_capacity, head_dim};
-            mx::array grown_k = mx::zeros(full_shape, l.k_cache->dtype());
-            mx::array grown_v = mx::zeros(full_shape, l.v_cache->dtype());
+            mx::array grown_k = mx::zeros(full_shape, c.k->dtype());
+            mx::array grown_v = mx::zeros(full_shape, c.v->dtype());
             if (n_past_ > 0) {
-                mx::array old_k = mx::slice(*l.k_cache, {0, 0, 0, 0}, {1, n_kv, n_past_, head_dim});
-                mx::array old_v = mx::slice(*l.v_cache, {0, 0, 0, 0}, {1, n_kv, n_past_, head_dim});
+                mx::array old_k = mx::slice(*c.k, {0, 0, 0, 0}, {1, n_kv, n_past_, head_dim});
+                mx::array old_v = mx::slice(*c.v, {0, 0, 0, 0}, {1, n_kv, n_past_, head_dim});
                 grown_k = mx::slice_update(grown_k, old_k, {0, 0, 0, 0}, {1, n_kv, n_past_, head_dim});
                 grown_v = mx::slice_update(grown_v, old_v, {0, 0, 0, 0}, {1, n_kv, n_past_, head_dim});
             }
-            l.k_cache = grown_k;
-            l.v_cache = grown_v;
+            c.k = grown_k;
+            c.v = grown_v;
         }
-        l.k_cache = mx::slice_update(*l.k_cache, k, {0, 0, n_past_, 0},
-                                      {1, n_kv, n_past_ + T, head_dim});
-        l.v_cache = mx::slice_update(*l.v_cache, v, {0, 0, n_past_, 0},
-                                      {1, n_kv, n_past_ + T, head_dim});
-        mx::array k_valid = mx::slice(*l.k_cache, {0, 0, 0, 0}, {1, n_kv, n_past_ + T, head_dim});
-        mx::array v_valid = mx::slice(*l.v_cache, {0, 0, 0, 0}, {1, n_kv, n_past_ + T, head_dim});
+        c.k = mx::slice_update(*c.k, k, {0, 0, n_past_, 0}, {1, n_kv, n_past_ + T, head_dim});
+        c.v = mx::slice_update(*c.v, v, {0, 0, n_past_, 0}, {1, n_kv, n_past_ + T, head_dim});
+        mx::array k_valid = mx::slice(*c.k, {0, 0, 0, 0}, {1, n_kv, n_past_ + T, head_dim});
+        mx::array v_valid = mx::slice(*c.v, {0, 0, 0, 0}, {1, n_kv, n_past_ + T, head_dim});
 
         const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
         mx::array   attn  = (T > 1)
@@ -421,23 +430,24 @@ std::vector<float> LlamaModel::forward_logits(const std::vector<int32_t>& tokens
         x    = x + l.wo.apply(attn);
 
         // ---- mlp ----
-        h              = mx::fast::rms_norm(x, l.post_attn_norm, cfg_.rms_norm_eps);
+        h              = mx::fast::rms_norm(x, l.post_attn_norm, cfg.rms_norm_eps);
         mx::array gate = l.w_gate.apply(h);
         mx::array up   = l.w_up.apply(h);
         x              = x + l.w_down.apply(mx::multiply(mx::multiply(gate, mx::sigmoid(gate)), up));
     }
 
-    x = mx::fast::rms_norm(x, final_norm_, cfg_.rms_norm_eps);
+    x = mx::fast::rms_norm(x, weights_->final_norm, cfg.rms_norm_eps);
     // last position only; tied embeddings → logits via the (possibly
     // quantized) embedding projection
-    mx::array last   = mx::slice(x, {0, T - 1, 0}, {1, T, cfg_.hidden_size}, {1, 1, 1});
-    mx::array logits = mx::astype(mx::reshape(lm_head_.apply(last), {cfg_.vocab_size}), mx::float32);
+    mx::array last = mx::slice(x, {0, T - 1, 0}, {1, T, cfg.hidden_size}, {1, 1, 1});
+    mx::array logits =
+        mx::astype(mx::reshape(weights_->lm_head.apply(last), {cfg.vocab_size}), mx::float32);
     mx::eval(logits);
 
     n_past_    += T;
     allocated_  = new_capacity;
 
-    std::vector<float> out(static_cast<size_t>(cfg_.vocab_size));
+    std::vector<float> out(static_cast<size_t>(cfg.vocab_size));
     std::memcpy(out.data(), logits.data<float>(), out.size() * sizeof(float));
     return out;
 }

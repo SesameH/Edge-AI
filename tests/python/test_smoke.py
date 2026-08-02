@@ -205,3 +205,73 @@ class TestMlx:
             assert m.runtime_stats()['model_bytes'] < 230_000_000
         finally:
             m.close()
+
+
+class TestSharedWeights:
+    """A second handle on one model is a second KV cache, not a second model.
+
+    This is what makes `--slots N` affordable: N contexts over one set of
+    parameters. Both text backends load through a process-wide cache keyed on
+    the model, and each says so when it hits.
+    """
+
+    @pytest.mark.parametrize(
+        'backend,kind',
+        [('llama_cpp', 'gguf'), ('mlx', 'safetensors')],
+    )
+    def test_a_second_handle_reuses_the_first_ones_weights(self, sdk, backend, kind, caplog):
+        import logging
+
+        from unirt.auto import AutoModelForCausalLM
+
+        if backend == 'mlx':
+            from conftest import require_mlx
+
+            require_mlx(sdk)
+        path = model_path(kind)
+
+        first = AutoModelForCausalLM.from_pretrained(path, device_map=backend)
+        try:
+            with caplog.at_level(logging.DEBUG, logger='unirt'):
+                second = AutoModelForCausalLM.from_pretrained(path, device_map=backend)
+            try:
+                assert any(
+                    'reusing already-loaded weights' in record.message
+                    for record in caplog.records
+                ), 'the second handle loaded its own copy of the weights'
+                # Sharing must not have coupled the two contexts: each keeps
+                # its own KV cache, so what one generated is not in the other.
+                assert 'Paris' in ask_capital(second)
+                assert second.runtime_stats()['model_bytes'] == \
+                    first.runtime_stats()['model_bytes']
+            finally:
+                second.close()
+            # The surviving handle still owns working weights after the other
+            # one released its reference.
+            assert 'Paris' in ask_capital(first)
+        finally:
+            first.close()
+
+    def test_weights_are_released_once_every_handle_is_closed(self, sdk, caplog, tmp_path):
+        """The cache holds a weak reference, so closing everything frees it."""
+        import logging
+        import shutil
+
+        from unirt.auto import AutoModelForCausalLM
+
+        # A copy of its own, so the result does not depend on whether some
+        # other test in this session still holds the shared fixture open.
+        path = str(tmp_path / 'copy.gguf')
+        shutil.copyfile(model_path('gguf'), path)
+
+        first = AutoModelForCausalLM.from_pretrained(path, device_map='llama_cpp')
+        first.close()
+        with caplog.at_level(logging.DEBUG, logger='unirt'):
+            second = AutoModelForCausalLM.from_pretrained(path, device_map='llama_cpp')
+        try:
+            assert not any(
+                'reusing already-loaded weights' in record.message
+                for record in caplog.records
+            ), 'a closed handle left its weights resident'
+        finally:
+            second.close()

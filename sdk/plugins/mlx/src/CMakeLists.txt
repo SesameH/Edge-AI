@@ -1,4 +1,5 @@
-add_library(unirt_mlx SHARED plugin.cpp model.cpp tokenizer.cpp json_constraint.cpp)
+add_library(unirt_mlx SHARED
+    plugin.cpp model.cpp weight_cache.cpp tokenizer.cpp json_constraint.cpp)
 
 target_compile_definitions(unirt_mlx PUBLIC UNIRT_SHARED)
 

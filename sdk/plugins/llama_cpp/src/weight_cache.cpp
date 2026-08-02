@@ -3,6 +3,7 @@
 
 #include "weight_cache.h"
 
+#include <filesystem>
 #include <map>
 #include <mutex>
 
@@ -27,9 +28,15 @@ std::map<std::string, std::weak_ptr<llama_model>>& cache() {
 
 std::string cache_key(
     const std::string& path, const std::string& device_key, const llama_model_params& params) {
+    // Two spellings of one file are one model. Falls back to the path as
+    // given when it cannot be resolved -- that load is about to fail anyway,
+    // and llama.cpp's own error names the file the caller actually asked for.
+    std::error_code error;
+    const auto      canonical = std::filesystem::weakly_canonical(path, error);
     // \x1f between parts: a unit separator cannot appear in a path or a
     // device id, so no two different requests can collide on one key.
-    return path + '\x1f' + device_key + '\x1f' + std::to_string(params.n_gpu_layers);
+    return (error ? path : canonical.string()) + '\x1f' + device_key + '\x1f' +
+           std::to_string(params.n_gpu_layers);
 }
 
 }  // namespace

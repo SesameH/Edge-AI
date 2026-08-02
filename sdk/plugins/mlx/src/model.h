@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -47,8 +48,43 @@ struct Linear {
     int64_t          nbytes() const;
 };
 
+// One checkpoint's parameters. Read-only once loaded, which is what lets
+// several LlamaModel instances -- one per decoding slot -- share a single
+// copy instead of each paying for its own.
+struct LlamaWeights {
+    struct Layer {
+        Linear wq, wk, wv, wo;
+        Linear w_gate, w_up, w_down;
+        mlx::core::array input_norm{0.f}, post_attn_norm{0.f};
+    };
+
+    LlamaConfig        cfg;
+    mlx::core::array   embed{0.f};  // dense table for lookups (dequantized if needed)
+    Linear             lm_head;     // tied to embed weights; quantized form kept for logits
+    mlx::core::array   final_norm{0.f};
+    std::vector<Layer> layers;
+    int64_t            bytes = 0;
+};
+
+using SharedWeights = std::shared_ptr<const LlamaWeights>;
+
+// Read a checkpoint off disk. Every array is materialized before returning,
+// so the result is safe to share across threads.
+LlamaWeights load_weights(const std::string& model_dir, const LlamaConfig& cfg);
+
+// The weights for `model_dir`, loaded once and shared from then on. A second
+// slot on the same model costs a KV cache rather than a second copy of the
+// parameters.
+SharedWeights acquire_weights(const std::string& model_dir, const LlamaConfig& cfg);
+
+// How many distinct checkpoints are resident. Test hook.
+size_t loaded_weight_count();
+
 // Minimal Llama-architecture decoder on MLX. Supports dense and
 // MLX-quantized (4/8-bit affine) checkpoints; logits in float32.
+//
+// The parameters are shared (see LlamaWeights); the KV cache and the position
+// it is filled to belong to this instance alone.
 class LlamaModel {
    public:
     void load(const std::string& model_dir, const LlamaConfig& cfg);
@@ -68,28 +104,24 @@ class LlamaModel {
     bool    trim_cache(int32_t n_past);
     int32_t n_past() const { return n_past_; }
     int32_t cache_capacity() const { return max_capacity_; }
-    const LlamaConfig& config() const { return cfg_; }
+    const LlamaConfig& config() const { return weights_->cfg; }
 
-    int64_t weights_bytes() const { return weights_bytes_; }
+    // The size of the parameters this instance decodes with, whether or not
+    // another slot is sharing them -- the same figure llama.cpp reports per
+    // context.
+    int64_t weights_bytes() const { return weights_ ? weights_->bytes : 0; }
     int64_t kv_cache_bytes() const;
 
    private:
-    struct Layer {
-        Linear wq, wk, wv, wo;
-        Linear w_gate, w_up, w_down;
-        mlx::core::array input_norm{0.f}, post_attn_norm{0.f};
-        std::optional<mlx::core::array> k_cache, v_cache;
+    struct LayerCache {
+        std::optional<mlx::core::array> k, v;
     };
 
-    LlamaConfig        cfg_;
-    mlx::core::array   embed_{0.f};  // dense table for lookups (dequantized if needed)
-    Linear             lm_head_;     // tied to embed weights; quantized form kept for logits
-    mlx::core::array   final_norm_{0.f};
-    std::vector<Layer> layers_;
-    int32_t            n_past_        = 0;
-    int32_t            max_capacity_  = 0;  // ceiling negotiated via reserve_cache (== n_ctx)
-    int32_t            allocated_     = 0;  // current physical buffer size, <= max_capacity_
-    int64_t            weights_bytes_ = 0;
+    SharedWeights           weights_;
+    std::vector<LayerCache> cache_;
+    int32_t                 n_past_       = 0;
+    int32_t                 max_capacity_ = 0;  // ceiling from reserve_cache (== n_ctx)
+    int32_t                 allocated_    = 0;  // current physical buffer size, <= max_capacity_
 };
 
 }  // namespace unirt::mlx_plugin
