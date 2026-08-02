@@ -238,6 +238,27 @@ only ever learned this endpoint. It takes a string or an array of strings
 `suffix` are refused rather than silently ignored, since a reply that quietly
 means something else is worse than an error.
 
+`--slots N` lets N requests decode at the same time. Each slot is its own KV
+cache over the same weights — the llama.cpp plugin shares a loaded model
+between every handle on the same file, so a slot costs a context, not a second
+copy of the model (measured on a 138 MB Q8_0: +204 MB for the first handle,
++16 MB for each one after).
+
+What that buys is not aggregate throughput — one decode already saturates the
+device, so four concurrent requests finish in about the time one batch would.
+It is head-of-line blocking. A short request arriving behind a long one, on an
+M1 with a 135M model:
+
+| | long request (400 tok) | 3 short requests (8 tok) behind it |
+|---|---|---|
+| `--slots 1` | 2.77 s | 2.63 / 2.70 / 2.76 s |
+| `--slots 4` | 3.05 s | **0.27 / 0.27 / 0.27 s** |
+
+The default is 1, which is the old behaviour: a slot is real memory, and on a
+7B with a long context four of them is several GB. Requests are routed to the
+slot that already holds their conversation, so a continuing chat prefills only
+its new turn instead of landing on a stranger's cache.
+
 Both endpoints report log-probabilities: `logprobs: true` with an optional
 `top_logprobs: N` on chat, `logprobs: N` on `/v1/completions` (the two carry
 different response shapes, and each endpoint emits its own). They stream too,

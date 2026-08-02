@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -17,7 +18,6 @@ from unirt.server import (
     _parse_generation_args,
     _prepare_messages,
     _validate_messages,
-    _with_serialized_model,
 )
 
 
@@ -48,44 +48,6 @@ class FakeModel:
             'process_rss_bytes': 910,
             'device_name': 'Fake GPU',
         }
-
-
-def test_successful_request_keeps_cached_state_for_the_next_one():
-    """The cached prefix is the whole point: resetting after a good run would
-    make every turn of a conversation re-prefill the entire transcript."""
-    model = FakeModel()
-    result = _with_serialized_model(model, threading.Lock(), lambda: model.generate('hi'))
-    assert result.text == 'ok'
-    assert model.reset_count == 0
-
-
-def test_failed_generation_drops_cached_state():
-    """A run that raised may leave the plugin's transcript out of step with its
-    KV, and the next request would then reuse a prefix that is not really there."""
-    model = FakeModel(fail=True)
-    with pytest.raises(RuntimeError, match='boom'):
-        _with_serialized_model(model, threading.Lock(), lambda: model.generate('hi'))
-    assert model.reset_count == 1
-
-
-def test_abandoned_stream_drops_cached_state():
-    """A client that disconnects mid-stream aborts generation part-written."""
-    model = FakeModel()
-
-    def disconnect():
-        raise BrokenPipeError('client went away')
-
-    with pytest.raises(BrokenPipeError):
-        _with_serialized_model(model, threading.Lock(), disconnect)
-    assert model.reset_count == 1
-
-
-def test_prefix_cache_can_be_turned_off():
-    model = FakeModel()
-    _with_serialized_model(
-        model, threading.Lock(), lambda: model.generate('hi'), reuse_prefix=False
-    )
-    assert model.reset_count == 1
 
 
 @pytest.mark.parametrize(
@@ -202,7 +164,9 @@ def test_server_main_accepts_hf_vlm_and_does_not_request_llm_stats(monkeypatch, 
     server.main()
 
     assert loaded == [('acme/vision-GGUF', {'device_map': 'llama_cpp', 'n_ctx': 0})]
-    assert served == [(model, 'vision-GGUF', '127.0.0.1', 9000)]
+    # A list because the chat model is now a pool of decoding slots; a VLM
+    # gets exactly one, since media position state is per handle.
+    assert served == [([model], 'vision-GGUF', '127.0.0.1', 9000)]
     assert model.closed
     assert 'VLM: vision' in capsys.readouterr().out
 
@@ -1350,3 +1314,152 @@ def test_legacy_text_offsets_track_the_returned_text():
     assert server._legacy_logprob_payload(steps, 0)['text_offset'] == [0, 2, 5]
     # echo puts the prompt in front of the completion, so every token moves.
     assert server._legacy_logprob_payload(steps, 7)['text_offset'] == [7, 9, 12]
+
+
+# ---------------------------------------------------------------------------
+# SlotPool
+# ---------------------------------------------------------------------------
+
+
+class SlotModel:
+    """Minimal stand-in that records resets, for pool bookkeeping tests."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.resets = 0
+        self.closed = False
+
+    def reset(self):
+        self.resets += 1
+
+    def close(self):
+        self.closed = True
+
+
+def _pool(count: int):
+    return server.SlotPool([SlotModel(f'm{index}') for index in range(count)])
+
+
+def test_a_new_conversation_takes_an_idle_slot_rather_than_evicting_a_live_one():
+    """The bug this pins: every conversation key starts with the same role
+    marker, so scoring by longest common prefix made an unrelated request look
+    like a better match for a busy slot than an untouched one was."""
+    pool = _pool(3)
+    alpha = server._conversation_key([{'role': 'user', 'content': 'Alpha alpha.'}])
+    beta = server._conversation_key([{'role': 'user', 'content': 'Beta beta.'}])
+
+    with pool.checkout(alpha) as first:
+        first_model = first.model
+    with pool.checkout(beta) as second:
+        assert second.model is not first_model
+
+
+def test_a_continuing_conversation_returns_to_its_own_slot():
+    pool = _pool(3)
+    first_turn = [{'role': 'user', 'content': 'Alpha alpha.'}]
+    with pool.checkout(server._conversation_key(first_turn)) as slot:
+        home = slot.model
+    with pool.checkout(server._conversation_key([{'role': 'user', 'content': 'Beta.'}])):
+        pass
+
+    later = first_turn + [
+        {'role': 'assistant', 'content': 'hi'},
+        {'role': 'user', 'content': 'And again.'},
+    ]
+    with pool.checkout(server._conversation_key(later)) as slot:
+        assert slot.model is home
+
+
+def test_a_conversation_key_grows_by_appending():
+    """Slot affinity is a startswith test, so a turn must extend the key its
+    predecessor stored rather than rewrite it."""
+    messages = [{'role': 'user', 'content': 'one'}]
+    first = server._conversation_key(messages)
+    messages += [{'role': 'assistant', 'content': 'two'}, {'role': 'user', 'content': 'three'}]
+    assert server._conversation_key(messages).startswith(first)
+
+
+def test_multimodal_content_still_produces_a_key():
+    key = server._conversation_key([
+        {'role': 'user', 'content': [
+            {'type': 'image', 'image': '/tmp/x.png'},
+            {'type': 'text', 'text': 'describe'},
+        ]},
+    ])
+    assert 'describe' in key
+
+
+def test_slots_are_handed_out_one_at_a_time_and_returned():
+    pool = _pool(2)
+    with pool.checkout('a'):
+        with pool.checkout('b'):
+            # Both taken; a third caller must wait rather than share one.
+            with pytest.raises(TimeoutError):
+                with pool.checkout('c', timeout=0.05):
+                    pass
+    # Both back.
+    with pool.checkout('a'), pool.checkout('b'):
+        pass
+
+
+def test_a_failed_run_drops_that_slot_s_cache_but_keeps_the_slot():
+    pool = _pool(2)
+    with pytest.raises(RuntimeError):
+        with pool.checkout('a') as slot:
+            failed = slot.model
+            raise RuntimeError('boom')
+    assert failed.resets == 1
+    # Reusable straight away, and no longer claiming to hold that conversation.
+    with pool.checkout('a') as slot:
+        assert slot.affinity == ''
+
+
+def test_prefix_reuse_can_be_turned_off_per_pool():
+    pool = _pool(1)
+    with pool.checkout('a', reuse_prefix=False) as slot:
+        model = slot.model
+    assert model.resets == 1
+    with pool.checkout('a') as slot:
+        assert slot.affinity == ''
+
+
+def test_a_successful_run_keeps_the_cache():
+    pool = _pool(1)
+    with pool.checkout('a') as slot:
+        model = slot.model
+    assert model.resets == 0
+
+
+def test_concurrent_checkouts_never_hand_the_same_slot_to_two_callers():
+    pool = _pool(4)
+    overlapping = []
+    live = set()
+    guard = threading.Lock()
+
+    def worker(index):
+        with pool.checkout(f'conversation-{index}') as slot:
+            with guard:
+                if slot.model in live:
+                    overlapping.append(slot.model)
+                live.add(slot.model)
+            time.sleep(0.01)
+            with guard:
+                live.discard(slot.model)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not overlapping
+
+
+def test_closing_the_pool_closes_every_handle():
+    pool = _pool(3)
+    pool.close()
+    assert all(model.closed for model in pool.models)
+
+
+def test_a_pool_needs_at_least_one_handle():
+    with pytest.raises(ValueError):
+        server.SlotPool([])

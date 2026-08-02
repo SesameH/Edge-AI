@@ -19,6 +19,7 @@
 #include "generation_state.h"
 #include "device_label.h"
 #include "schema_grammar.h"
+#include "weight_cache.h"
 
 namespace unirt::llama_plugin {
 
@@ -224,7 +225,11 @@ int32_t LlamaCppLlm::create(const unirt_LlmCreateInput* input) {
         }
     }
 
-    ModelPtr model(llama_model_load_from_file(input->model_path, model_params));
+    // device_key is what stops two handles sharing weights they cannot share:
+    // an explicit device pin bakes a different placement into the load.
+    const std::string device_key =
+        input->device_id && input->device_id[0] ? input->device_id : selected_device_name;
+    SharedModel model = acquire_model(input->model_path, device_key, model_params);
     if (!model) {
         UNIRT_LOG_ERROR("llama_cpp: failed to load GGUF model {}", input->model_path);
         return UNIRT_ERROR_COMMON_MODEL_LOAD;
@@ -275,7 +280,7 @@ int32_t LlamaCppLlm::create(const unirt_LlmCreateInput* input) {
         }
         context_params.offload_kqv = false;
         context_params.op_offload = false;
-        model.reset(llama_model_load_from_file(input->model_path, model_params));
+        model = acquire_model(input->model_path, selected_device_name, model_params);
         if (model) context.reset(llama_init_from_model(model.get(), context_params));
     }
     if (!context) {

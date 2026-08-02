@@ -475,7 +475,7 @@ def _cmd_serve(arguments: argparse.Namespace) -> int:
     forwarded: list[str] = []
     for name in ('model', 'backend', 'embedding_model', 'embedding_device',
                  'rerank_model', 'rerank_device', 'host', 'port', 'n_ctx',
-                 'api_key', 'max_queued_requests'):
+                 'api_key', 'max_queued_requests', 'slots', 'slot_timeout'):
         value = getattr(arguments, name, None)
         if value is not None:
             forwarded += [f"--{name.replace('_', '-')}", str(value)]
@@ -735,6 +735,9 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument('--n-ctx', type=int, default=0)
     serve.add_argument('--api-key', help='Require Authorization: Bearer <key>')
     serve.add_argument('--no-prefix-cache', action='store_true')
+    serve.add_argument('--slots', type=int, default=1,
+                       help='requests that may decode at the same time')
+    serve.add_argument('--slot-timeout', type=float, default=120.0)
     serve.add_argument('--max-queued-requests', type=int, default=8)
     serve.set_defaults(func=_cmd_serve)
 

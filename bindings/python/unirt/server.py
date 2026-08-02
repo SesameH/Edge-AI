@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import binascii
 import hmac
 import json
@@ -68,33 +69,6 @@ _MAX_TOP_LOGPROBS = 20
 
 def _completion_id(prefix: str = 'chatcmpl') -> str:
     return f'{prefix}-' + uuid.uuid4().hex[:24]
-
-
-def _with_serialized_model(model, lock: threading.Lock, operation, *, reuse_prefix=True):
-    """Serialize one generation, dropping cached state only when it may be stale.
-
-    Cached KV is what makes multi-turn chat cheap: with n_past=0 the plugin
-    reuses the longest prefix shared with the previous transcript, so a resent
-    conversation only prefills its new suffix. Resetting on the way out threw
-    that away and made every turn re-prefill the whole transcript, which grows
-    with the conversation.
-
-    Nothing about the HTTP contract changes -- clients still send the full
-    transcript every time, and a prompt that does not extend the cached one
-    simply matches a shorter prefix. A failed or abandoned run is the one case
-    where the plugin's transcript may no longer mirror its KV, so that path
-    still resets.
-    """
-
-    with lock:
-        try:
-            result = operation()
-        except BaseException:
-            model.reset()
-            raise
-        if not reuse_prefix:
-            model.reset()
-        return result
 
 
 def _parse_embedding_request(req: dict) -> tuple[list[str] | list[list[int]], str]:
@@ -331,6 +305,137 @@ def _parse_generation_args(req: dict) -> dict:
         else:
             raise ValueError("response_format.type must be 'text', 'json_object' or 'json_schema'")
     return result
+
+
+def _conversation_key(messages) -> str:
+    """A string whose prefixes grow with the conversation, for slot affinity.
+
+    Only ever compared prefix-wise against another one of these, so the exact
+    encoding does not matter -- only that appending a turn appends to the key
+    rather than rewriting it. Multimodal parts collapse to their type: a slot
+    holding this conversation's text prefix is still the right one.
+    """
+
+    parts = []
+    for message in messages:
+        content = message.get('content', '')
+        if not isinstance(content, str):
+            content = ' '.join(
+                block.get('text', block.get('type', ''))
+                for block in content
+                if isinstance(block, dict)
+            )
+        parts.append(f"{message.get('role', '')}\x1f{content}")
+    return '\x1e'.join(parts)
+
+
+def _shared_prefix(left: str, right: str) -> int:
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
+
+
+class _Slot:
+    """One decoding slot: a model handle and the KV cache that belongs to it."""
+
+    __slots__ = ('model', 'affinity')
+
+    def __init__(self, model) -> None:
+        self.model = model
+        # What this slot's cached KV was last built from. Not the rendered
+        # prompt: rendering has to happen on the slot's own handle, and that
+        # handle may be mid-generation when the choice is being made.
+        self.affinity = ''
+
+
+class SlotPool:
+    """Several handles on one model, each decoding independently.
+
+    The server used to hold one handle behind one lock, so a second request
+    waited for the first to finish generating -- fine for a desktop chat
+    window, useless for anything else. A slot is a separate llama_context with
+    its own KV cache; the weights behind them are shared inside the plugin, so
+    N slots cost N key-value caches rather than N copies of the model.
+
+    Which slot a request gets is not arbitrary. Each one remembers what its
+    cache was last built from, and an incoming request goes to the free slot
+    with the longest shared prefix, so a conversation returns to the slot that
+    already holds it and prefills only its new turn. Round-robin would throw
+    that away on every request.
+    """
+
+    def __init__(self, models: list) -> None:
+        if not models:
+            raise ValueError('a slot pool needs at least one model handle')
+        self._slots = [_Slot(model) for model in models]
+        self._free = list(self._slots)
+        self._condition = threading.Condition()
+
+    def __len__(self) -> int:
+        return len(self._slots)
+
+    @property
+    def models(self) -> list:
+        return [slot.model for slot in self._slots]
+
+    @staticmethod
+    def _score(slot: _Slot, affinity: str) -> int:
+        """How much this slot's cache is worth to this request.
+
+        Continuation, not similarity. A next turn *extends* the key its own
+        previous turn stored, so the test is startswith, not longest common
+        prefix -- two unrelated conversations still share the leading role
+        marker, and scoring that made a new conversation evict a live one in
+        preference to taking an idle slot.
+        """
+
+        if slot.affinity and affinity.startswith(slot.affinity):
+            return len(slot.affinity)
+        # An idle slot costs nothing to take; a stranger's slot throws away a
+        # cache that is still worth something to whoever built it.
+        return 0 if not slot.affinity else -1
+
+    def _take(self, affinity: str) -> _Slot:
+        best = max(
+            range(len(self._free)),
+            key=lambda index: self._score(self._free[index], affinity),
+        )
+        return self._free.pop(best)
+
+    @contextlib.contextmanager
+    def checkout(self, affinity: str, *, reuse_prefix: bool = True, timeout: float | None = None):
+        """Lease a slot, or raise TimeoutError if none frees up in time."""
+        with self._condition:
+            if not self._free and not self._condition.wait_for(
+                lambda: bool(self._free), timeout=timeout
+            ):
+                raise TimeoutError('no decoding slot became free')
+            slot = self._take(affinity)
+        try:
+            yield slot
+        except BaseException:
+            # A run that raised or was abandoned may leave the plugin's
+            # transcript out of step with its KV, and the next request on this
+            # slot would then reuse a prefix that is not really there.
+            slot.model.reset()
+            slot.affinity = ''
+            raise
+        else:
+            if reuse_prefix:
+                slot.affinity = affinity
+            else:
+                slot.model.reset()
+                slot.affinity = ''
+        finally:
+            with self._condition:
+                self._free.append(slot)
+                self._condition.notify()
+
+    def close(self) -> None:
+        for slot in self._slots:
+            slot.model.close()
 
 
 def _parse_logprobs_request(req: dict, *, chat: bool) -> int:
@@ -849,31 +954,28 @@ class Handler(BaseHTTPRequestHandler):
             prepared.cleanup()
             return
 
-        model = self.server.model
         try:
-            # Generation mutates KV state; serialize and bracket every request
-            # with reset so exceptions/disconnects cannot poison the next one.
-            def generate_response():
-                prompt = model._apply_chat_template(
-                    prepared.messages,
-                    True,
-                    False,
-                    None,
-                )
+            # The affinity key is the conversation, not the rendered prompt:
+            # rendering runs on the slot's own handle, which may still be
+            # generating while the choice is being made. Rendering is a pure
+            # function of the messages, so a growing conversation shares a
+            # prefix here exactly as it will there.
+            with self.server.pool.checkout(
+                _conversation_key(prepared.messages),
+                reuse_prefix=self.server.reuse_prefix,
+                timeout=self.server.slot_timeout,
+            ) as slot:
+                model = slot.model
+                prompt = model._apply_chat_template(prepared.messages, True, False, None)
                 if isinstance(model, UniRTVLM):
                     gen_kwargs['images'] = prepared.images
                     gen_kwargs['audios'] = prepared.audios
                 if req.get('stream'):
-                    self._stream_completion(prompt, gen_kwargs, plan)
+                    self._stream_completion(model, prompt, gen_kwargs, plan)
                 else:
-                    self._blocking_completion(prompt, gen_kwargs, plan)
-
-            _with_serialized_model(
-                model,
-                self.server.gen_lock,
-                generate_response,
-                reuse_prefix=self.server.reuse_prefix,
-            )
+                    self._blocking_completion(model, prompt, gen_kwargs, plan)
+        except TimeoutError:
+            self._busy()
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as exc:  # noqa: BLE001 — HTTP boundary
@@ -918,15 +1020,17 @@ class Handler(BaseHTTPRequestHandler):
             self._busy()
             return
         try:
-            def run() -> None:
+            with self.server.pool.checkout(
+                prompts[0],
+                reuse_prefix=self.server.reuse_prefix,
+                timeout=self.server.slot_timeout,
+            ) as slot:
                 if stream:
-                    self._stream_text_completions(prompts, gen_kwargs, echo)
+                    self._stream_text_completions(slot.model, prompts, gen_kwargs, echo)
                 else:
-                    self._blocking_text_completions(prompts, gen_kwargs, echo)
-
-            _with_serialized_model(
-                model, self.server.gen_lock, run, reuse_prefix=self.server.reuse_prefix
-            )
+                    self._blocking_text_completions(slot.model, prompts, gen_kwargs, echo)
+        except TimeoutError:
+            self._busy()
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as exc:  # noqa: BLE001 — HTTP boundary
@@ -938,13 +1042,13 @@ class Handler(BaseHTTPRequestHandler):
             self.server.request_slots.release()
 
     def _blocking_text_completions(
-        self, prompts: list[str], gen_kwargs: dict, echo: bool
+        self, model, prompts: list[str], gen_kwargs: dict, echo: bool
     ) -> None:
         choices = []
         prompt_tokens = 0
         completion_tokens = 0
         for index, prompt in enumerate(prompts):
-            out = self.server.model.generate(prompt, **gen_kwargs)
+            out = model.generate(prompt, **gen_kwargs)
             profile = out.profile
             prompt_tokens += profile.prompt_tokens
             completion_tokens += profile.generated_tokens
@@ -975,7 +1079,7 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _stream_text_completions(
-        self, prompts: list[str], gen_kwargs: dict, echo: bool
+        self, model, prompts: list[str], gen_kwargs: dict, echo: bool
     ) -> None:
         self._begin_event_stream()
         cid = _completion_id('cmpl')
@@ -996,7 +1100,7 @@ class Handler(BaseHTTPRequestHandler):
         for index, prompt in enumerate(prompts):
             if echo:
                 self._send_event(chunk(index, prompt))
-            streamer = self.server.model.generate(prompt, stream=True, **gen_kwargs)
+            streamer = model.generate(prompt, stream=True, **gen_kwargs)
             reported = 0
             offset = len(prompt) if echo else 0
             try:
@@ -1139,8 +1243,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- completion modes ----
 
-    def _blocking_completion(self, prompt: str, gen_kwargs: dict, plan=None) -> None:
-        out = self.server.model.generate(prompt, **gen_kwargs)
+    def _blocking_completion(self, model, prompt: str, gen_kwargs: dict, plan=None) -> None:
+        out = model.generate(prompt, **gen_kwargs)
         p = out.profile
         finish = 'stop' if p.stop_reason in ('eos', 'stop_sequence') else 'length'
         message, finish = _assistant_message(out.text, finish, plan)
@@ -1196,7 +1300,7 @@ class Handler(BaseHTTPRequestHandler):
         except BaseException:
             pass
 
-    def _stream_completion(self, prompt: str, gen_kwargs: dict, plan=None) -> None:
+    def _stream_completion(self, model, prompt: str, gen_kwargs: dict, plan=None) -> None:
         self._begin_event_stream()
 
         cid = _completion_id()
@@ -1214,7 +1318,7 @@ class Handler(BaseHTTPRequestHandler):
             }
 
         send_chunk(delta({'role': 'assistant', 'content': ''}))
-        streamer = self.server.model.generate(prompt, stream=True, **gen_kwargs)
+        streamer = model.generate(prompt, stream=True, **gen_kwargs)
         # With tools the token stream is a half-written JSON envelope, not
         # anything a client can render, so those pieces are accumulated and
         # emitted once as a finished delta. Plain turns still stream live.
@@ -1267,8 +1371,13 @@ class UniRTHTTPServer(ThreadingHTTPServer):
         reranker=None,
         reranker_id: str | None = None,
         api_key: str | None = None,
+        slot_timeout: float = 120.0,
     ):
-        self.model = model
+        # `model` may be one handle or several on the same weights; several is
+        # what lets requests decode at the same time.
+        handles = list(model) if isinstance(model, (list, tuple)) else ([model] if model else [])
+        self.pool = SlotPool(handles) if handles else None
+        self.model = handles[0] if handles else None
         self.model_id = model_id
         self.embedding = embedding
         self.embedding_id = embedding_id
@@ -1276,13 +1385,17 @@ class UniRTHTTPServer(ThreadingHTTPServer):
         self.reranker_id = reranker_id
         self.api_key = api_key
         self.reuse_prefix = reuse_prefix
-        self.capabilities = model.capabilities() if isinstance(model, UniRTVLM) else None
-        self.gen_lock = threading.Lock()
-        # Generation itself is fully serialized by gen_lock (one model, one KV
-        # state); this only bounds how many callers may be queued waiting for
-        # it, so a burst sheds load with 503s instead of piling up unbounded
-        # blocked threads.
+        self.capabilities = (
+            self.model.capabilities() if isinstance(self.model, UniRTVLM) else None
+        )
+        # Bounds how many callers may be queued waiting for a slot, so a burst
+        # sheds load with 503s instead of piling up unbounded blocked threads.
+        # Independent of the slot count: slots decide how many run at once.
         self.request_slots = threading.Semaphore(max_queued_requests)
+        # How long a request waits for a slot before giving up with a 503.
+        # Long enough to ride out a normal turn ahead of it, short enough that
+        # a client is not left hanging behind a queue it cannot see.
+        self.slot_timeout = slot_timeout
         super().__init__(address, Handler)
 
 
@@ -1298,12 +1411,13 @@ def serve(
     reranker=None,
     reranker_id: str | None = None,
     api_key: str | None = None,
+    slot_timeout: float = 120.0,
 ) -> None:
     """Serve until interrupted, then stop accepting and join active requests."""
 
     server = UniRTHTTPServer(
         (host, port), model, model_id, max_queued_requests, embedding, embedding_id,
-        reuse_prefix, reranker, reranker_id, api_key,
+        reuse_prefix, reranker, reranker_id, api_key, slot_timeout,
     )
     previous_handlers: dict[int, object] = {}
 
@@ -1383,6 +1497,23 @@ def main(argv: list[str] | None = None) -> None:
              'KV can produce versus a cold prefill',
     )
     ap.add_argument(
+        '--slots',
+        type=int,
+        default=1,
+        help='how many requests may decode at the same time. Each slot is a '
+             'separate KV cache over the same weights (the plugin shares '
+             'those), so the cost is one context per slot, not one model. '
+             'Default 1, which is the old behaviour: a second request waits '
+             'for the first to finish',
+    )
+    ap.add_argument(
+        '--slot-timeout',
+        type=float,
+        default=120.0,
+        help='seconds a request waits for a free slot before giving up with '
+             '503 (default: 120)',
+    )
+    ap.add_argument(
         '--max-queued-requests',
         type=int,
         default=8,
@@ -1394,6 +1525,10 @@ def main(argv: list[str] | None = None) -> None:
         ap.error('--n-ctx must be >= 0')
     if args.max_queued_requests < 1:
         ap.error('--max-queued-requests must be >= 1')
+    if args.slots < 1:
+        ap.error('--slots must be >= 1')
+    if args.slot_timeout <= 0:
+        ap.error('--slot-timeout must be positive')
     api_key = args.api_key or os.environ.get('UNIRT_API_KEY') or None
     # Authorization travels as latin-1 and RFC 6750 bearer tokens are ASCII,
     # so a key outside ASCII is one no client can present -- the server would
@@ -1419,17 +1554,30 @@ def main(argv: list[str] | None = None) -> None:
         if args.model:
             model_source, model_id = _source_and_id(args.model)
             print(f'loading {model_source} on {args.backend} ...')
-            model = AutoModelForCausalLM.from_pretrained(
-                model_source, device_map=args.backend, n_ctx=args.n_ctx
-            )
-            if isinstance(model, UniRTVLM):
+            handles = [
+                AutoModelForCausalLM.from_pretrained(
+                    model_source, device_map=args.backend, n_ctx=args.n_ctx
+                )
+            ]
+            if isinstance(handles[0], UniRTVLM):
+                if args.slots > 1:
+                    ap.error('--slots is text-only; a VLM keeps media position state per handle')
                 capabilities = ', '.join(
-                    name for name, supported in model.capabilities().items() if supported
+                    name for name, supported in handles[0].capabilities().items() if supported
                 ) or 'no media modality'
                 served.append(f'VLM: {capabilities}')
             else:
-                stats = model.runtime_stats()
-                served.append(f"chat on {stats['device_name'] or '?'}")
+                # Extra slots reuse the weights already in memory (the plugin
+                # shares them), so each one costs a KV cache rather than a
+                # second copy of the model.
+                for _ in range(args.slots - 1):
+                    handles.append(AutoModelForCausalLM.from_pretrained(
+                        model_source, device_map=args.backend, n_ctx=args.n_ctx
+                    ))
+                stats = handles[0].runtime_stats()
+                slots = f', {args.slots} slots' if args.slots > 1 else ''
+                served.append(f"chat on {stats['device_name'] or '?'}{slots}")
+            model = handles
 
         if args.embedding_model:
             embedding_source, embedding_id = _source_and_id(args.embedding_model)
@@ -1467,9 +1615,10 @@ def main(argv: list[str] | None = None) -> None:
             reranker,
             reranker_id,
             api_key,
+            args.slot_timeout,
         )
     finally:
-        for handle in (model, embedding, reranker):
+        for handle in [*(model or []), embedding, reranker]:
             if handle is not None:
                 handle.close()
 

@@ -11,9 +11,13 @@
 #include <llama.h>
 
 #include "plugin/llm_backend.h"
+#include "weight_cache.h"
 
 namespace unirt::llama_plugin {
 
+/** Sole ownership of a llama_model. Still what the VLM and embedding backends
+ *  use: only the text backend has a reason to share weights so far, since only
+ *  it gets opened several times over for a pool of decoding slots. */
 struct ModelDeleter {
     void operator()(llama_model* model) const noexcept;
 };
@@ -32,7 +36,8 @@ using SamplerPtr = std::unique_ptr<llama_sampler, SamplerDeleter>;
 
 /**
  * UniRT's text-generation contract implemented only through llama.cpp's
- * public API. An instance owns one model, one sequence, and its KV state.
+ * public API. An instance owns one context, one sequence, and its KV state;
+ * the weights behind it are shared with any other handle on the same file.
  * Calls on the same handle are serialized because llama_context is mutable.
  */
 class LlamaCppLlm final : public LlmBackend {
@@ -73,7 +78,10 @@ class LlamaCppLlm final : public LlmBackend {
     size_t reusable_prefix(const std::vector<llama_token>& wanted) const;
 
     mutable std::mutex mutex_;
-    ModelPtr          gguf_model_;
+    // Shared with every other handle that opened the same file on the same
+    // device: llama_model is read-only, and it is context_ below that holds
+    // this handle's own mutable KV state. See weight_cache.h.
+    SharedModel       gguf_model_;
     ContextPtr        context_;
     const llama_vocab* vocab_ = nullptr;
 
