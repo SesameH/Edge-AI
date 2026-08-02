@@ -585,7 +585,12 @@ int32_t LlamaCppLlm::tokenize(
 }
 
 int32_t LlamaCppLlm::evict_for_space(int32_t incoming) {
-    if (!shift_supported_) return 0;
+    // Both conditions, and the flag is the caller's. Evicting without being
+    // asked drops the oldest turns and answers from a conversation the caller
+    // never sent -- silently, since the reply looks perfectly normal. The ABI
+    // says overflow is an error unless sliding_window says otherwise, and
+    // this backend used to ignore that and shift regardless.
+    if (!shift_supported_ || !sliding_window_) return 0;
     const int32_t cached = static_cast<int32_t>(history_.size());
     const int32_t head   = std::min(pinned_head_, cached);
     // Free at least enough for the incoming tokens, but take half of the
@@ -898,6 +903,7 @@ int32_t LlamaCppLlm::generate(
         // 0 keeps the plugin default; negative turns speculation off for this
         // request without unloading the draft model.
         if (input->config->n_draft != 0) draft_tokens_ = input->config->n_draft;
+        sliding_window_ = input->config->sliding_window;
         if (input->config->sliding_window_n_keep > 0) {
             pinned_head_ = input->config->sliding_window_n_keep;
         }
@@ -964,7 +970,7 @@ int32_t LlamaCppLlm::generate(
     }
 
     const size_t used = history_.size();
-    if (!shift_supported_ &&
+    if ((!shift_supported_ || !sliding_window_) &&
         (used > static_cast<size_t>(context_size_) ||
          prompt.size() > static_cast<size_t>(context_size_))) {
         UNIRT_LOG_ERROR(

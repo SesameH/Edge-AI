@@ -154,6 +154,9 @@ class LlamaCppLlm final : public LlmBackend {
     // first `pinned_head_` tokens anchored. Disabled for models whose memory
     // cannot shift (recurrent / SWA-incompatible).
     bool    shift_supported_ = false;
+    // Per request: whether the caller asked for eviction instead of an
+    // overflow error. Off unless asked, which is what the ABI promises.
+    bool    sliding_window_  = false;
     int32_t pinned_head_     = 4;
     // Reused by pick(): a candidate array is one entry per vocabulary token,
     // and speculation builds one per verification position. Allocating that

@@ -186,6 +186,7 @@ class MlxLlm : public LlmBackend {
         int32_t max_tokens = 512;
         int32_t requested_past = 0;
         int32_t logprob_alternatives = 0;
+        bool    sliding_window = false;
         std::vector<std::string> stops;
         const unirt_SamplerConfig* sampler_config = nullptr;
         if (input->config) {
@@ -198,8 +199,15 @@ class MlxLlm : public LlmBackend {
             sampler_config = input->config->sampler_config;
             if (input->config->logprobs < 0) return UNIRT_ERROR_COMMON_INVALID_INPUT;
             logprob_alternatives = input->config->logprobs;
-            if (input->config->sliding_window) {
-                return UNIRT_ERROR_COMMON_PARAM_NOT_SUPPORTED;
+            // The flag is a request for behaviour this backend can provide,
+            // so it is honoured rather than refused -- and honoured in both
+            // directions. Shifting unconditionally was the older behaviour
+            // and it broke the ABI's promise the other way: with the flag
+            // off, overflow has to be reported as overflow, not silently
+            // papered over by dropping the start of the conversation.
+            sliding_window = input->config->sliding_window;
+            if (input->config->sliding_window_n_keep > 0) {
+                pinned_head_ = input->config->sliding_window_n_keep;
             }
             for (int32_t i = 0; i < input->config->stop_count; ++i) {
                 if (input->config->stop[i] && input->config->stop[i][0]) {
@@ -287,7 +295,7 @@ class MlxLlm : public LlmBackend {
         }
 
         if (fresh_ids.size() > static_cast<size_t>(n_ctx_ - model_.n_past())) {
-            if (!shift_context() ||
+            if (!sliding_window || !shift_context() ||
                 fresh_ids.size() > static_cast<size_t>(n_ctx_ - model_.n_past())) {
                 UNIRT_LOG_ERROR("mlx: context length {} exceeded", n_ctx_);
                 return UNIRT_ERROR_LLM_TOKENIZATION_CONTEXT_LENGTH;
@@ -327,7 +335,7 @@ class MlxLlm : public LlmBackend {
                 }
                 break;
             }
-            if (model_.n_past() >= n_ctx_ && !shift_context()) {
+            if (model_.n_past() >= n_ctx_ && (!sliding_window || !shift_context())) {
                 stop_reason = "context_length";
                 if (!stream_state.emit_safe(input->on_token, input->user_data, true)) {
                     stream_state.discard_unemitted();
@@ -431,12 +439,23 @@ class MlxLlm : public LlmBackend {
     // is nothing left to keep (n_ctx_ <= 1).
     bool shift_context() {
         if (n_ctx_ <= 1 || transcript_.empty()) return false;
-        const size_t keep = std::min(transcript_.size(), static_cast<size_t>(std::max(1, n_ctx_ / 2)));
-        std::vector<int32_t> retained(transcript_.end() - static_cast<ptrdiff_t>(keep), transcript_.end());
+        const size_t budget = std::min(transcript_.size(), static_cast<size_t>(std::max(1, n_ctx_ / 2)));
+        // Keep the head as well as the tail, the way llama_cpp does. Dropping
+        // the oldest tokens outright means dropping the system prompt, which
+        // is the one part of a conversation that has to survive eviction --
+        // and it is what made the two backends disagree about what this
+        // option means.
+        const size_t head = std::min(static_cast<size_t>(std::max(0, pinned_head_)), budget / 2);
+        const size_t tail = budget - head;
+        std::vector<int32_t> retained(transcript_.begin(), transcript_.begin() + static_cast<ptrdiff_t>(head));
+        retained.insert(
+            retained.end(), transcript_.end() - static_cast<ptrdiff_t>(tail), transcript_.end());
         model_.reset_cache();
         model_.forward_logits(retained);
         transcript_.assign(retained.begin(), retained.end());
-        UNIRT_LOG_DEBUG("mlx: context shifted, retained {} of {} token budget", keep, n_ctx_);
+        UNIRT_LOG_DEBUG(
+            "mlx: context shifted, retained {} head + {} tail of {} token budget", head, tail,
+            n_ctx_);
         return true;
     }
 
@@ -572,6 +591,9 @@ class MlxLlm : public LlmBackend {
     // Ids of every token currently represented in the KV cache, in order.
     // Lets a resent conversation transcript skip re-evaluating its prefix.
     std::vector<int32_t> transcript_;
+    // Tokens held at the head when the context is shifted, so the system
+    // prompt survives eviction. Same default as llama_cpp's.
+    int32_t pinned_head_ = 4;
 };
 
 class MlxPlugin : public BackendPackage {

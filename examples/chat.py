@@ -108,6 +108,10 @@ def main() -> None:
                 repetition_penalty=args.repeat_penalty,
                 seed=args.seed,
                 stream=True,
+                # Keep talking when the conversation outgrows the context,
+                # rather than stopping with an error. The backends will not
+                # assume that on the caller's behalf.
+                sliding_window=True,
             )
             reply = ''
             for chunk in streamer:

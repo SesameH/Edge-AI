@@ -247,6 +247,13 @@ def _parse_generation_args(req: dict) -> dict:
         'temperature': temperature,
         'top_p': top_p,
         'seed': seed,
+        # A policy the server picks, not something the plugins do on their own:
+        # a chat that outgrows the context should keep answering rather than
+        # start returning errors, and dropping the oldest turns is the least
+        # bad way to do that. The library refuses to make that choice silently
+        # -- see sliding_window in unirt.h -- which is why it is spelled out
+        # here where it can be turned off.
+        'sliding_window': True,
     }
 
     # presence_penalty and frequency_penalty are standard OpenAI fields and
