@@ -235,14 +235,21 @@ def test_stats_endpoint_exposes_runtime_stats():
 
 
 def test_server_sheds_load_with_503_when_request_slots_exhausted():
-    """Generation is serialized behind one lock; request_slots bounds the
-    queue so a burst gets a fast 503 instead of piling up blocked threads."""
+    """request_slots bounds how many callers are in the server at once, so a
+    burst gets a fast 503 instead of piling up blocked threads.
+
+    The bound covers the requests that are decoding as well as the ones
+    queued behind them: two slots plus a queue depth of one admits three.
+    """
     import http.client
 
     httpd = server.UniRTHTTPServer(
-        ('127.0.0.1', 0), FakeModel(), 'fake-model', max_queued_requests=1
+        ('127.0.0.1', 0), [FakeModel(), FakeModel()], 'fake-model', max_queued_requests=1
     )
-    httpd.request_slots.acquire()  # simulate the one slot already in flight
+    admitted = 0
+    while httpd.request_slots.acquire(blocking=False):
+        admitted += 1
+    assert admitted == 3  # 2 slots + 1 queued
     port = httpd.server_address[1]
     worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
     worker.start()
@@ -1307,6 +1314,65 @@ def test_the_two_endpoints_use_different_logprob_shapes():
     assert legacy['token_logprobs'] == [-0.76, -0.62]
     # A mapping per position, not a list of objects.
     assert legacy['top_logprobs'] == [{' the': -1.33}, {}]
+
+
+class FakeTrimmedStreamer:
+    """A run whose last decoded token contributes no text.
+
+    That is what a stop sequence looks like from here: the token that
+    triggered it is decoded, reported, and then trimmed out of the answer. The
+    steps list therefore outgrows the pieces the client ever sees.
+    """
+
+    def __init__(self, output):
+        self.output = output
+        self.logprobs = []
+
+    def __iter__(self):
+        for piece in ('Hel', 'lo'):
+            self.logprobs.append(_fake_step(piece, len(self.logprobs), -0.5))
+            yield piece
+        self.logprobs.append(_fake_step(' STOP', 99, -1.5))
+
+    def cancel(self):
+        pass
+
+
+class FakeTrimmedModel(FakeModel):
+    def generate(self, _prompt, *, stream: bool = False, **_kwargs):
+        profile = SimpleNamespace(stop_reason='stop_sequence', prompt_tokens=2,
+                                  generated_tokens=3)
+        steps = [_fake_step('Hel', 0, -0.5), _fake_step('lo', 1, -0.5),
+                 _fake_step(' STOP', 99, -1.5)]
+        out = SimpleNamespace(text='Hello', profile=profile, logprobs=steps)
+        return FakeTrimmedStreamer(out) if stream else out
+
+
+def test_streaming_reports_every_logprob_the_blocking_reply_would():
+    """Otherwise the same request answers with a different number of tokens
+    depending only on whether it was streamed."""
+    request = {'messages': [{'role': 'user', 'content': 'hi'}],
+               'logprobs': True, 'top_logprobs': 0}
+    _, blocking = _post_to(
+        _completion_server(FakeTrimmedModel()), '/v1/chat/completions', dict(request))
+    _, raw = _post_raw(
+        _completion_server(FakeTrimmedModel()), '/v1/chat/completions',
+        dict(request, stream=True))
+    chunks = _sse_events(raw)
+
+    expected = [entry['token'] for entry in blocking['choices'][0]['logprobs']['content']]
+    streamed = [
+        entry['token']
+        for chunk in chunks
+        for entry in (chunk['choices'][0].get('logprobs') or {}).get('content', [])
+    ]
+    assert expected == ['Hel', 'lo', ' STOP']
+    assert streamed == expected
+    # The trimmed token rides on the chunk that closes the stream, since no
+    # text chunk followed it.
+    final = chunks[-1]['choices'][0]
+    assert final['finish_reason'] == 'stop'
+    assert [e['token'] for e in final['logprobs']['content']] == [' STOP']
 
 
 def test_legacy_text_offsets_track_the_returned_text():

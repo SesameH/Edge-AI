@@ -329,14 +329,6 @@ def _conversation_key(messages) -> str:
     return '\x1e'.join(parts)
 
 
-def _shared_prefix(left: str, right: str) -> int:
-    limit = min(len(left), len(right))
-    index = 0
-    while index < limit and left[index] == right[index]:
-        index += 1
-    return index
-
-
 class _Slot:
     """One decoding slot: a model handle and the KV cache that belongs to it."""
 
@@ -780,9 +772,9 @@ class Handler(BaseHTTPRequestHandler):
         self._json(code, {'error': {'message': message, 'type': 'invalid_request_error'}})
 
     def _busy(self) -> None:
-        # Generation is serialized behind one model/lock; request_slots bounds
-        # how many callers may be queued waiting for it so load sheds with a
-        # clear signal instead of piling up unbounded blocked threads.
+        # Every decoding slot is busy and the queue behind them is full, or a
+        # request waited out --slot-timeout. Shedding with a clear signal beats
+        # piling up blocked threads a client cannot see.
         self._json(
             503,
             {'error': {
@@ -1021,7 +1013,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             with self.server.pool.checkout(
-                prompts[0],
+                # The prompts run one after another on the one slot, so what
+                # its cache holds afterwards is the last of them -- that is
+                # the affinity the next request should match against.
+                prompts[-1],
                 reuse_prefix=self.server.reuse_prefix,
                 timeout=self.server.slot_timeout,
             ) as slot:
@@ -1095,8 +1090,9 @@ class Handler(BaseHTTPRequestHandler):
                 }],
             }
 
-        # Prompts run one after another rather than interleaved: the model is
-        # serialized behind one KV cache, so there is no concurrency to express.
+        # Prompts run one after another rather than interleaved: this request
+        # holds one slot, which is one KV cache, so there is no concurrency to
+        # express within it.
         for index, prompt in enumerate(prompts):
             if echo:
                 self._send_event(chunk(index, prompt))
@@ -1123,7 +1119,13 @@ class Handler(BaseHTTPRequestHandler):
                 'stop' if out and out.profile.stop_reason in ('eos', 'stop_sequence')
                 else 'length'
             )
-            self._send_event(chunk(index, '', finish=finish))
+            # Same as the chat stream: the steps behind the last piece of text
+            # (a trimmed stop-sequence token) still belong in the reply.
+            trailing = _pending_steps(streamer, reported)
+            self._send_event(chunk(
+                index, '', finish=finish,
+                logprobs=_legacy_logprob_payload(trailing, offset) if trailing else None,
+            ))
         self._end_event_stream()
 
     def _handle_embeddings(self) -> None:
@@ -1148,8 +1150,8 @@ class Handler(BaseHTTPRequestHandler):
             # Tokenizing here rather than calling encode() is what makes
             # usage.prompt_tokens truthful: encode() tokenizes internally and
             # reports nothing back. UniRTEmbedding serializes itself, so this
-            # deliberately does not take gen_lock -- embedding a corpus must not
-            # queue behind a long completion.
+            # deliberately does not take a decoding slot -- embedding a corpus
+            # must not queue behind a long completion.
             if isinstance(inputs[0], str):
                 ids, masks, types = model._tokenize(inputs)
             else:
@@ -1348,7 +1350,12 @@ class Handler(BaseHTTPRequestHandler):
                     {'index': index, **call} for index, call in enumerate(message['tool_calls'])
                 ]
             send_chunk(delta(payload))
-        send_chunk(delta({}, finish=finish))
+        # Tokens can be decoded after the last piece of text: a stop sequence
+        # is recognised from a token whose text is then trimmed away. Blocking
+        # replies report those steps, so the stream has to as well, or the same
+        # request answers with a different number of logprobs depending only on
+        # how it was asked for.
+        send_chunk(delta({}, finish=finish, logprobs=_pending_logprobs(streamer, reported)))
         self._end_event_stream()
 
 
@@ -1388,10 +1395,12 @@ class UniRTHTTPServer(ThreadingHTTPServer):
         self.capabilities = (
             self.model.capabilities() if isinstance(self.model, UniRTVLM) else None
         )
-        # Bounds how many callers may be queued waiting for a slot, so a burst
+        # Bounds how many callers may be in the server at once, so a burst
         # sheds load with 503s instead of piling up unbounded blocked threads.
-        # Independent of the slot count: slots decide how many run at once.
-        self.request_slots = threading.Semaphore(max_queued_requests)
+        # It has to leave room for the running requests as well as the queued
+        # ones: sized at the queue depth alone, a pool with more slots than
+        # that would have had slots it could never hand out.
+        self.request_slots = threading.Semaphore(len(self.pool or ()) + max_queued_requests)
         # How long a request waits for a slot before giving up with a 503.
         # Long enough to ride out a normal turn ahead of it, short enough that
         # a client is not left hanging behind a queue it cannot see.
