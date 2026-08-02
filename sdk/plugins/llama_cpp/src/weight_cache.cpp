@@ -73,13 +73,4 @@ SharedModel acquire_model(
     return model;
 }
 
-size_t loaded_model_count() {
-    std::lock_guard<std::mutex> lock(cache_mutex());
-    size_t live = 0;
-    for (const auto& [_, weak] : cache()) {
-        if (!weak.expired()) ++live;
-    }
-    return live;
-}
-
 }  // namespace unirt::llama_plugin

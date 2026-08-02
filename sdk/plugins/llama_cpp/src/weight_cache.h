@@ -31,7 +31,4 @@ using SharedModel = std::shared_ptr<llama_model>;
 SharedModel acquire_model(
     const std::string& path, const std::string& device_key, const llama_model_params& params);
 
-/** How many distinct weight sets are currently loaded. For tests and logging. */
-size_t loaded_model_count();
-
 }  // namespace unirt::llama_plugin

@@ -77,9 +77,6 @@ LlamaWeights load_weights(const std::string& model_dir, const LlamaConfig& cfg);
 // parameters.
 SharedWeights acquire_weights(const std::string& model_dir, const LlamaConfig& cfg);
 
-// How many distinct checkpoints are resident. Test hook.
-size_t loaded_weight_count();
-
 // Minimal Llama-architecture decoder on MLX. Supports dense and
 // MLX-quantized (4/8-bit affine) checkpoints; logits in float32.
 //

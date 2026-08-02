@@ -69,13 +69,4 @@ SharedWeights acquire_weights(const std::string& model_dir, const LlamaConfig& c
     return weights;
 }
 
-size_t loaded_weight_count() {
-    std::lock_guard<std::mutex> lock(cache_mutex());
-    size_t                      live = 0;
-    for (const auto& [_, weak] : cache()) {
-        if (!weak.expired()) ++live;
-    }
-    return live;
-}
-
 }  // namespace unirt::mlx_plugin
