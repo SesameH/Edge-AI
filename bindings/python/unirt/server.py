@@ -5,6 +5,12 @@
 
     python3 -m unirt.server --model models/SmolLM2-135M-Instruct --backend mlx --port 8080
 
+--model may be repeated, and the "model" field of a request then picks between
+them; all but the first load on demand:
+
+    python3 -m unirt.server --model small=models/SmolLM2-135M-Instruct-Q8_0.gguf \
+        --model gemma=models/gemma-3-270m-it-Q8_0.gguf --max-resident-models 1
+
 Any of the models may be omitted, so this also serves as a retrieval sidecar:
 
     python3 -m unirt.server --embedding-model models/all-MiniLM-L6-v2-GGUF \
@@ -430,6 +436,237 @@ class SlotPool:
             slot.model.close()
 
 
+@dataclass(frozen=True)
+class ModelSpec:
+    """How to load one named model, and how many slots to give it."""
+
+    name: str
+    source: str
+    backend: str = 'llama_cpp'
+    n_ctx: int = 0
+    slots: int = 1
+
+
+class _Resident:
+    """A loaded model: its pool of slots, and what is keeping it loaded."""
+
+    __slots__ = ('spec', 'pool', 'model', 'capabilities', 'users', 'idle_since')
+
+    def __init__(self, spec: ModelSpec, pool: SlotPool) -> None:
+        self.spec = spec
+        self.pool = pool
+        # One handle stands for all of them when the question is about the
+        # model rather than about a decoding slot: modality, capabilities,
+        # runtime stats.
+        self.model = pool.models[0]
+        self.capabilities = (
+            self.model.capabilities() if isinstance(self.model, UniRTVLM) else None
+        )
+        self.users = 0
+        self.idle_since = time.monotonic()
+
+    @property
+    def name(self) -> str:
+        return self.spec.name
+
+
+def load_slots(spec: ModelSpec) -> list:
+    """Open a model's handles: one per decoding slot, over shared weights."""
+    first = AutoModelForCausalLM.from_pretrained(
+        spec.source, device_map=spec.backend, n_ctx=spec.n_ctx
+    )
+    if isinstance(first, UniRTVLM):
+        # Media position state is per handle, so a VLM gets exactly one slot
+        # whatever was asked for.
+        if spec.slots > 1:
+            print(f'note: {spec.name} is a VLM and gets one slot, not {spec.slots}')
+        return [first]
+    return [first] + [
+        AutoModelForCausalLM.from_pretrained(
+            spec.source, device_map=spec.backend, n_ctx=spec.n_ctx
+        )
+        for _ in range(spec.slots - 1)
+    ]
+
+
+class ModelRegistry:
+    """The chat models this server can serve, by name.
+
+    A model loads when a request first names it, and stays loaded while
+    anything is using it. That is what makes several models affordable on a
+    device that could not hold them all at once: configuring a model costs
+    nothing until it is asked for, and `--max-resident-models` /
+    `--model-idle-timeout` decide when one is given back.
+
+    The `model` field of a request picks one. With a single model configured
+    the field is not checked -- there is then no other model the request could
+    wrongly be served by, and clients that hardcode a name would break for no
+    gain. With several, an unknown name is a 404 rather than a silent answer
+    from whichever model happened to be loaded.
+    """
+
+    def __init__(
+        self,
+        specs: list[ModelSpec],
+        *,
+        loader=load_slots,
+        resident_limit: int | None = None,
+        idle_timeout: float = 0.0,
+    ) -> None:
+        if not specs:
+            raise ValueError('a model registry needs at least one model')
+        self._specs = {spec.name: spec for spec in specs}
+        if len(self._specs) != len(specs):
+            raise ValueError('two models cannot share a name')
+        self._loader = loader
+        self._resident_limit = resident_limit or len(specs)
+        self._idle_timeout = idle_timeout
+        self._resident: dict[str, _Resident] = {}
+        self._lock = threading.Lock()
+        # Per model, so that loading one does not hold up requests for another.
+        self._load_locks = {name: threading.Lock() for name in self._specs}
+        self._stop = threading.Event()
+        self._reaper: threading.Thread | None = None
+        self.default_name = specs[0].name
+        if idle_timeout > 0:
+            self._reaper = threading.Thread(
+                target=self._reap_idle, name='unirt-model-reaper', daemon=True
+            )
+            self._reaper.start()
+
+    def names(self) -> list[str]:
+        return list(self._specs)
+
+    @property
+    def routed(self) -> bool:
+        """Whether the `model` field of a request has anything to choose."""
+        return len(self._specs) > 1
+
+    @property
+    def total_slots(self) -> int:
+        return sum(spec.slots for spec in self._specs.values())
+
+    def resolve(self, requested) -> str:
+        """The name to serve, or KeyError if the client asked for a stranger."""
+        if requested is None or not self.routed:
+            return self.default_name
+        if not isinstance(requested, str):
+            raise ValueError('model must be a string')
+        if requested not in self._specs:
+            raise KeyError(requested)
+        return requested
+
+    def loaded(self) -> list[_Resident]:
+        with self._lock:
+            return list(self._resident.values())
+
+    @contextlib.contextmanager
+    def acquire(self, name: str):
+        """Pin a model as loaded for the duration of the block."""
+        entry = self._pin(name)
+        try:
+            yield entry
+        finally:
+            with self._lock:
+                entry.users -= 1
+                if entry.users <= 0:
+                    entry.idle_since = time.monotonic()
+            # Releasing is the moment something becomes evictable. Without
+            # this, a registry pushed over its limit because everything was
+            # in use would stay over it until the next load.
+            self._evict_over_limit()
+
+    def preload(self, name: str) -> _Resident:
+        """Load a model now rather than on first use. Startup uses this for
+        the default model, so a bad path or a missing plugin is reported while
+        someone is still watching the terminal."""
+        with self.acquire(name) as entry:
+            return entry
+
+    def _pin(self, name: str) -> _Resident:
+        with self._lock:
+            entry = self._resident.get(name)
+            if entry is not None:
+                entry.users += 1
+                return entry
+            spec = self._specs[name]
+
+        # Loading takes seconds and must happen outside the registry lock, or
+        # a request for an already-resident model would queue behind it. The
+        # per-model lock is what keeps two callers from loading it twice.
+        with self._load_locks[name]:
+            with self._lock:
+                entry = self._resident.get(name)
+                if entry is not None:
+                    entry.users += 1
+                    return entry
+            pool = SlotPool(self._loader(spec))
+            entry = _Resident(spec, pool)
+            with self._lock:
+                entry.users += 1
+                self._resident[name] = entry
+        self._evict_over_limit()
+        return entry
+
+    def _evict_over_limit(self) -> None:
+        while True:
+            with self._lock:
+                if len(self._resident) <= self._resident_limit:
+                    return
+                idle = [entry for entry in self._resident.values() if entry.users <= 0]
+                if not idle:
+                    # Everything resident is in use. Staying over the limit
+                    # beats closing a model out from under a live request; the
+                    # next release brings it back down.
+                    return
+                victim = min(idle, key=lambda entry: entry.idle_since)
+                del self._resident[victim.name]
+            victim.pool.close()
+
+    def _reap_idle(self) -> None:
+        # Wake often enough to be roughly punctual without spinning on a long
+        # timeout.
+        interval = max(1.0, min(self._idle_timeout, 30.0))
+        while not self._stop.wait(interval):
+            deadline = time.monotonic() - self._idle_timeout
+            with self._lock:
+                stale = [
+                    entry
+                    for entry in self._resident.values()
+                    if entry.users <= 0 and entry.idle_since <= deadline
+                ]
+                for entry in stale:
+                    del self._resident[entry.name]
+            for entry in stale:
+                entry.pool.close()
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._reaper is not None:
+            self._reaper.join(timeout=5)
+        with self._lock:
+            entries = list(self._resident.values())
+            self._resident.clear()
+        for entry in entries:
+            entry.pool.close()
+
+
+def _registry_of(handles: list, name: str) -> ModelRegistry:
+    """A registry over handles that are already open.
+
+    The single `--model` path and the tests hand the server live handles
+    rather than something to load, so the one model is resident from the
+    start and there is nothing to reload it from.
+    """
+
+    registry = ModelRegistry(
+        [ModelSpec(name=name, source='', slots=len(handles))],
+        loader=lambda _spec: handles,
+    )
+    registry.preload(name)
+    return registry
+
+
 def _parse_logprobs_request(req: dict, *, chat: bool) -> int:
     """How many alternatives to report per token, in the shape each endpoint uses.
 
@@ -842,6 +1079,28 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return body
 
+    def _resolve_model(self, req: dict) -> str | None:
+        """Which model this request named, or None once the error is answered.
+
+        With one model configured the field is not checked: there is nothing
+        else it could be routed to, and clients that hardcode an OpenAI model
+        name would break for no gain. With several, answering from the wrong
+        one is exactly the failure this endpoint has to avoid.
+        """
+
+        registry = self.server.registry
+        try:
+            return registry.resolve(req.get('model'))
+        except ValueError as exc:
+            self._error(400, str(exc))
+        except KeyError:
+            self._error(
+                404,
+                f"the model '{req.get('model')}' is not served here; "
+                f"this server has {', '.join(registry.names())}",
+            )
+        return None
+
     # ---- routes ----
 
     def do_OPTIONS(self):
@@ -863,29 +1122,48 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         if self.path == '/v1/models':
+            registry = self.server.registry
+            chat_models = registry.names() if registry is not None else []
             listed = [
                 {'id': name, 'object': 'model', 'owned_by': 'unirt'}
-                for name in (model_id, self.server.embedding_id, self.server.reranker_id)
+                for name in (
+                    *chat_models, self.server.embedding_id, self.server.reranker_id
+                )
                 if name is not None
             ]
             self._json(200, {'object': 'list', 'data': listed})
         elif self.path == '/v1/stats':
             # Not an OpenAI-standard endpoint: exposes runtime_stats() for
             # UIs/dashboards that want live device/memory info.
+            registry = self.server.registry
+            # Whichever chat model is resident right now -- with several
+            # configured, only the ones that have been asked for are loaded,
+            # and an unloaded model has no runtime to report.
+            resident = registry.loaded() if registry is not None else []
+            resident.sort(key=lambda entry: entry.name != model_id)
             served = next(
                 (
                     handle
                     for handle in (
-                        self.server.model, self.server.embedding, self.server.reranker
+                        resident[0].model if resident else None,
+                        self.server.embedding,
+                        self.server.reranker,
                     )
                     if handle is not None
                 ),
                 None,
             )
-            if served is None:
+            if served is None and registry is None:
                 self._error(404, 'this server was started with no model to report on')
                 return
-            self._json(200, served.runtime_stats())
+            # A configured model that has been unloaded (idle timeout, or
+            # evicted) has no runtime to report, but the server is still
+            # serving it -- 404 would read as "no such endpoint" to a
+            # dashboard polling this.
+            stats = served.runtime_stats() if served is not None else {}
+            if registry is not None:
+                stats['loaded_models'] = [entry.name for entry in resident]
+            self._json(200, stats)
         else:
             self._error(404, f'unknown path {self.path}')
 
@@ -905,11 +1183,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != '/v1/chat/completions':
             self._error(404, f'unknown path {self.path}')
             return
-        if self.server.model is None:
+        if self.server.registry is None:
             self._error(404, 'this server was started without a chat model (--model)')
             return
         req = self._read_json_body()
         if req is None:
+            return
+        served_name = self._resolve_model(req)
+        if served_name is None:
             return
 
         try:
@@ -932,40 +1213,50 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 messages = apply_tool_prompt(messages, plan)
                 gen_kwargs['json_schema'] = plan.schema()
-            prepared = _prepare_messages(
-                messages,
-                multimodal=isinstance(self.server.model, UniRTVLM),
-                capabilities=self.server.capabilities,
-            )
         except ValueError as exc:
             self._error(400, str(exc))
             return
 
         if not self.server.request_slots.acquire(blocking=False):
             self._busy()
-            prepared.cleanup()
             return
 
+        prepared = None
         try:
-            # The affinity key is the conversation, not the rendered prompt:
-            # rendering runs on the slot's own handle, which may still be
-            # generating while the choice is being made. Rendering is a pure
-            # function of the messages, so a growing conversation shares a
-            # prefix here exactly as it will there.
-            with self.server.pool.checkout(
-                _conversation_key(prepared.messages),
-                reuse_prefix=self.server.reuse_prefix,
-                timeout=self.server.slot_timeout,
-            ) as slot:
-                model = slot.model
-                prompt = model._apply_chat_template(prepared.messages, True, False, None)
-                if isinstance(model, UniRTVLM):
-                    gen_kwargs['images'] = prepared.images
-                    gen_kwargs['audios'] = prepared.audios
-                if req.get('stream'):
-                    self._stream_completion(model, prompt, gen_kwargs, plan)
-                else:
-                    self._blocking_completion(model, prompt, gen_kwargs, plan)
+            # Loading happens here rather than at startup for every model but
+            # the default, so a request pays for the model it named and for no
+            # other.
+            with self.server.registry.acquire(served_name) as served:
+                try:
+                    # Whether media is allowed is the served model's answer,
+                    # so it cannot be settled before the model is known.
+                    prepared = _prepare_messages(
+                        messages,
+                        multimodal=isinstance(served.model, UniRTVLM),
+                        capabilities=served.capabilities,
+                    )
+                except ValueError as exc:
+                    self._error(400, str(exc))
+                    return
+                # The affinity key is the conversation, not the rendered
+                # prompt: rendering runs on the slot's own handle, which may
+                # still be generating while the choice is being made.
+                # Rendering is a pure function of the messages, so a growing
+                # conversation shares a prefix here exactly as it will there.
+                with served.pool.checkout(
+                    _conversation_key(prepared.messages),
+                    reuse_prefix=self.server.reuse_prefix,
+                    timeout=self.server.slot_timeout,
+                ) as slot:
+                    model = slot.model
+                    prompt = model._apply_chat_template(prepared.messages, True, False, None)
+                    if isinstance(model, UniRTVLM):
+                        gen_kwargs['images'] = prepared.images
+                        gen_kwargs['audios'] = prepared.audios
+                    if req.get('stream'):
+                        self._stream_completion(model, prompt, gen_kwargs, served_name, plan)
+                    else:
+                        self._blocking_completion(model, prompt, gen_kwargs, served_name, plan)
         except TimeoutError:
             self._busy()
         except (BrokenPipeError, ConnectionResetError):
@@ -977,7 +1268,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
         finally:
             self.server.request_slots.release()
-            prepared.cleanup()
+            if prepared is not None:
+                prepared.cleanup()
 
     def _handle_completions(self) -> None:
         """POST /v1/completions -- the pre-chat endpoint, prompt in, text out.
@@ -987,15 +1279,14 @@ class Handler(BaseHTTPRequestHandler):
         template at all, both need that.
         """
 
-        model = self.server.model
-        if model is None:
+        if self.server.registry is None:
             self._error(404, 'this server was started without a chat model (--model)')
-            return
-        if isinstance(model, UniRTVLM):
-            self._error(400, '/v1/completions is text-only; this server loaded a VLM')
             return
         req = self._read_json_body()
         if req is None:
+            return
+        served_name = self._resolve_model(req)
+        if served_name is None:
             return
         try:
             gen_kwargs = _parse_generation_args(req)
@@ -1012,18 +1303,26 @@ class Handler(BaseHTTPRequestHandler):
             self._busy()
             return
         try:
-            with self.server.pool.checkout(
-                # The prompts run one after another on the one slot, so what
-                # its cache holds afterwards is the last of them -- that is
-                # the affinity the next request should match against.
-                prompts[-1],
-                reuse_prefix=self.server.reuse_prefix,
-                timeout=self.server.slot_timeout,
-            ) as slot:
-                if stream:
-                    self._stream_text_completions(slot.model, prompts, gen_kwargs, echo)
-                else:
-                    self._blocking_text_completions(slot.model, prompts, gen_kwargs, echo)
+            with self.server.registry.acquire(served_name) as served:
+                if isinstance(served.model, UniRTVLM):
+                    self._error(
+                        400, f"/v1/completions is text-only; '{served_name}' is a VLM"
+                    )
+                    return
+                with served.pool.checkout(
+                    # The prompts run one after another on the one slot, so
+                    # what its cache holds afterwards is the last of them --
+                    # that is the affinity the next request should match.
+                    prompts[-1],
+                    reuse_prefix=self.server.reuse_prefix,
+                    timeout=self.server.slot_timeout,
+                ) as slot:
+                    if stream:
+                        self._stream_text_completions(
+                            slot.model, prompts, gen_kwargs, echo, served_name)
+                    else:
+                        self._blocking_text_completions(
+                            slot.model, prompts, gen_kwargs, echo, served_name)
         except TimeoutError:
             self._busy()
         except (BrokenPipeError, ConnectionResetError):
@@ -1037,7 +1336,7 @@ class Handler(BaseHTTPRequestHandler):
             self.server.request_slots.release()
 
     def _blocking_text_completions(
-        self, model, prompts: list[str], gen_kwargs: dict, echo: bool
+        self, model, prompts: list[str], gen_kwargs: dict, echo: bool, model_id: str
     ) -> None:
         choices = []
         prompt_tokens = 0
@@ -1064,7 +1363,7 @@ class Handler(BaseHTTPRequestHandler):
             'id': _completion_id('cmpl'),
             'object': 'text_completion',
             'created': int(time.time()),
-            'model': self.server.model_id,
+            'model': model_id,
             'choices': choices,
             'usage': {
                 'prompt_tokens': prompt_tokens,
@@ -1074,7 +1373,7 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _stream_text_completions(
-        self, model, prompts: list[str], gen_kwargs: dict, echo: bool
+        self, model, prompts: list[str], gen_kwargs: dict, echo: bool, model_id: str
     ) -> None:
         self._begin_event_stream()
         cid = _completion_id('cmpl')
@@ -1083,7 +1382,7 @@ class Handler(BaseHTTPRequestHandler):
         def chunk(index: int, text: str, finish=None, logprobs=None) -> dict:
             return {
                 'id': cid, 'object': 'text_completion', 'created': created,
-                'model': self.server.model_id,
+                'model': model_id,
                 'choices': [{
                     'index': index, 'text': text, 'logprobs': logprobs,
                     'finish_reason': finish,
@@ -1245,7 +1544,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- completion modes ----
 
-    def _blocking_completion(self, model, prompt: str, gen_kwargs: dict, plan=None) -> None:
+    def _blocking_completion(
+        self, model, prompt: str, gen_kwargs: dict, model_id: str, plan=None
+    ) -> None:
         out = model.generate(prompt, **gen_kwargs)
         p = out.profile
         finish = 'stop' if p.stop_reason in ('eos', 'stop_sequence') else 'length'
@@ -1254,7 +1555,7 @@ class Handler(BaseHTTPRequestHandler):
             'id': _completion_id(),
             'object': 'chat.completion',
             'created': int(time.time()),
-            'model': self.server.model_id,
+            'model': model_id,
             'choices': [{
                 'index': 0,
                 'message': message,
@@ -1302,7 +1603,9 @@ class Handler(BaseHTTPRequestHandler):
         except BaseException:
             pass
 
-    def _stream_completion(self, model, prompt: str, gen_kwargs: dict, plan=None) -> None:
+    def _stream_completion(
+        self, model, prompt: str, gen_kwargs: dict, model_id: str, plan=None
+    ) -> None:
         self._begin_event_stream()
 
         cid = _completion_id()
@@ -1315,7 +1618,7 @@ class Handler(BaseHTTPRequestHandler):
                 choice['logprobs'] = logprobs
             return {
                 'id': cid, 'object': 'chat.completion.chunk', 'created': created,
-                'model': self.server.model_id,
+                'model': model_id,
                 'choices': [choice],
             }
 
@@ -1379,28 +1682,34 @@ class UniRTHTTPServer(ThreadingHTTPServer):
         reranker_id: str | None = None,
         api_key: str | None = None,
         slot_timeout: float = 120.0,
+        registry: ModelRegistry | None = None,
     ):
+        # Either a registry (several named models, loaded on demand) or the
+        # handles for one, which is the same thing with one entry in it.
         # `model` may be one handle or several on the same weights; several is
         # what lets requests decode at the same time.
-        handles = list(model) if isinstance(model, (list, tuple)) else ([model] if model else [])
-        self.pool = SlotPool(handles) if handles else None
-        self.model = handles[0] if handles else None
-        self.model_id = model_id
+        if registry is None:
+            handles = (
+                list(model) if isinstance(model, (list, tuple)) else ([model] if model else [])
+            )
+            registry = (
+                _registry_of(handles, model_id or 'model') if handles else None
+            )
+        self.registry = registry
+        self.model_id = model_id if registry is None else registry.default_name
         self.embedding = embedding
         self.embedding_id = embedding_id
         self.reranker = reranker
         self.reranker_id = reranker_id
         self.api_key = api_key
         self.reuse_prefix = reuse_prefix
-        self.capabilities = (
-            self.model.capabilities() if isinstance(self.model, UniRTVLM) else None
-        )
         # Bounds how many callers may be in the server at once, so a burst
         # sheds load with 503s instead of piling up unbounded blocked threads.
         # It has to leave room for the running requests as well as the queued
         # ones: sized at the queue depth alone, a pool with more slots than
         # that would have had slots it could never hand out.
-        self.request_slots = threading.Semaphore(len(self.pool or ()) + max_queued_requests)
+        configured_slots = registry.total_slots if registry is not None else 0
+        self.request_slots = threading.Semaphore(configured_slots + max_queued_requests)
         # How long a request waits for a slot before giving up with a 503.
         # Long enough to ride out a normal turn ahead of it, short enough that
         # a client is not left hanging behind a queue it cannot see.
@@ -1421,12 +1730,13 @@ def serve(
     reranker_id: str | None = None,
     api_key: str | None = None,
     slot_timeout: float = 120.0,
+    registry: ModelRegistry | None = None,
 ) -> None:
     """Serve until interrupted, then stop accepting and join active requests."""
 
     server = UniRTHTTPServer(
         (host, port), model, model_id, max_queued_requests, embedding, embedding_id,
-        reuse_prefix, reranker, reranker_id, api_key, slot_timeout,
+        reuse_prefix, reranker, reranker_id, api_key, slot_timeout, registry,
     )
     previous_handlers: dict[int, object] = {}
 
@@ -1447,6 +1757,10 @@ def serve(
         pass
     finally:
         server.server_close()
+        # The registry owns the chat handles -- with lazy loading, the caller
+        # cannot know which ones ever opened.
+        if server.registry is not None:
+            server.registry.close()
         for signum, previous in previous_handlers.items():
             try:
                 signal.signal(signum, previous)
@@ -1458,7 +1772,15 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description='OpenAI-compatible server over a UniRT model')
     ap.add_argument(
         '--model',
-        help='local model path or Hugging Face repository id',
+        action='append',
+        metavar='[NAME=]PATH',
+        help='local model path or Hugging Face repository id. May be given '
+             'more than once: the "model" field of a request then picks '
+             'between them and /v1/models lists them all. NAME= sets the name '
+             'clients use; without it the name is the path\'s last component. '
+             'The first one is the default for requests that name no model, '
+             'and is the only one loaded at startup -- the rest load when a '
+             'request first asks for them',
     )
     ap.add_argument('--backend', choices=['llama_cpp', 'mlx'], default='llama_cpp')
     ap.add_argument(
@@ -1526,12 +1848,34 @@ def main(argv: list[str] | None = None) -> None:
         '--max-queued-requests',
         type=int,
         default=8,
-        help='requests may queue waiting for the (serialized) model before '
-             'the server starts returning 503 (default: 8)',
+        help='requests that may queue waiting for a decoding slot before the '
+             'server starts returning 503. On top of the ones decoding, not '
+             'including them (default: 8)',
+    )
+    ap.add_argument(
+        '--max-resident-models',
+        type=int,
+        default=0,
+        help='how many of the --model entries may be loaded at once; the '
+             'least recently used idle one is closed to make room. 0 (the '
+             'default) keeps every model that has been asked for, which is '
+             'what fits when they were chosen to fit',
+    )
+    ap.add_argument(
+        '--model-idle-timeout',
+        type=float,
+        default=0.0,
+        help='seconds a loaded model may sit unused before it is closed and '
+             'its memory given back; it reloads on the next request that '
+             'names it. 0 (the default) never unloads',
     )
     args = ap.parse_args(argv)
     if args.n_ctx < 0:
         ap.error('--n-ctx must be >= 0')
+    if args.max_resident_models < 0:
+        ap.error('--max-resident-models must be >= 0')
+    if args.model_idle_timeout < 0:
+        ap.error('--model-idle-timeout must be >= 0')
     if args.max_queued_requests < 1:
         ap.error('--max-queued-requests must be >= 1')
     if args.slots < 1:
@@ -1552,7 +1896,26 @@ def main(argv: list[str] | None = None) -> None:
         source = os.path.abspath(path) if os.path.exists(path) else path
         return source, os.path.splitext(os.path.basename(path.rstrip('/')))[0]
 
-    model = None
+    def _spec(entry: str) -> ModelSpec:
+        """`NAME=PATH` or just `PATH`, where the name is then the basename.
+
+        Split on the first `=` only, and only when what precedes it is not
+        itself a path -- Windows drive letters and `=` in a directory name are
+        both rarer than getting this wrong would be annoying.
+        """
+        name, separator, path = entry.partition('=')
+        if not separator or os.path.exists(entry) or '/' in name or os.sep in name:
+            path, name = entry, ''
+        source, derived = _source_and_id(path)
+        return ModelSpec(
+            name=name or derived,
+            source=source,
+            backend=args.backend,
+            n_ctx=args.n_ctx,
+            slots=args.slots,
+        )
+
+    registry = None
     model_id = None
     embedding = None
     embedding_id = None
@@ -1561,32 +1924,32 @@ def main(argv: list[str] | None = None) -> None:
     served: list[str] = []
     try:
         if args.model:
-            model_source, model_id = _source_and_id(args.model)
-            print(f'loading {model_source} on {args.backend} ...')
-            handles = [
-                AutoModelForCausalLM.from_pretrained(
-                    model_source, device_map=args.backend, n_ctx=args.n_ctx
-                )
-            ]
-            if isinstance(handles[0], UniRTVLM):
-                if args.slots > 1:
-                    ap.error('--slots is text-only; a VLM keeps media position state per handle')
+            specs = [_spec(entry) for entry in args.model]
+            names = [spec.name for spec in specs]
+            if len(set(names)) != len(names):
+                ap.error(f'two models would answer to the same name: {", ".join(names)}')
+            model_id = specs[0].name
+            registry = ModelRegistry(
+                specs,
+                resident_limit=args.max_resident_models or None,
+                idle_timeout=args.model_idle_timeout,
+            )
+            # Only the default loads now. A bad path or a missing plugin is
+            # then reported while someone is still watching the terminal,
+            # without paying for models this run may never use.
+            print(f'loading {specs[0].source} on {args.backend} ...')
+            entry = registry.preload(model_id)
+            if entry.capabilities is not None:
                 capabilities = ', '.join(
-                    name for name, supported in handles[0].capabilities().items() if supported
+                    name for name, supported in entry.capabilities.items() if supported
                 ) or 'no media modality'
                 served.append(f'VLM: {capabilities}')
             else:
-                # Extra slots reuse the weights already in memory (the plugin
-                # shares them), so each one costs a KV cache rather than a
-                # second copy of the model.
-                for _ in range(args.slots - 1):
-                    handles.append(AutoModelForCausalLM.from_pretrained(
-                        model_source, device_map=args.backend, n_ctx=args.n_ctx
-                    ))
-                stats = handles[0].runtime_stats()
+                stats = entry.model.runtime_stats()
                 slots = f', {args.slots} slots' if args.slots > 1 else ''
                 served.append(f"chat on {stats['device_name'] or '?'}{slots}")
-            model = handles
+            if len(specs) > 1:
+                served.append(f'{len(specs)} models: {", ".join(names)} (loaded on demand)')
 
         if args.embedding_model:
             embedding_source, embedding_id = _source_and_id(args.embedding_model)
@@ -1613,7 +1976,7 @@ def main(argv: list[str] | None = None) -> None:
                   'anything that can reach this port can use the model')
         print(f"ready on http://{args.host}:{args.port}/v1  ({'; '.join(served)})")
         serve(
-            model,
+            None,
             model_id,
             args.host,
             args.port,
@@ -1625,9 +1988,14 @@ def main(argv: list[str] | None = None) -> None:
             reranker_id,
             api_key,
             args.slot_timeout,
+            registry,
         )
     finally:
-        for handle in [*(model or []), embedding, reranker]:
+        # serve() closes the registry, which owns whichever chat models ended
+        # up loaded; it only reaches here if the server never started.
+        if registry is not None:
+            registry.close()
+        for handle in (embedding, reranker):
             if handle is not None:
                 handle.close()
 

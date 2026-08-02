@@ -152,7 +152,10 @@ def test_server_main_accepts_hf_vlm_and_does_not_request_llm_stats(monkeypatch, 
     # over, not about serve()'s full signature, which keeps growing as
     # endpoints are added.
     def fake_serve(current, model_id, host, port, *rest, **kwargs):
-        served.append((current, model_id, host, port))
+        registry = kwargs.get('registry', rest[-1] if rest else None)
+        # Read the registry here: main() closes it as it returns.
+        served.append((registry.names(), [e.model for e in registry.loaded()],
+                       model_id, host, port))
 
     monkeypatch.setattr(server, 'serve', fake_serve)
     monkeypatch.setattr(
@@ -164,9 +167,13 @@ def test_server_main_accepts_hf_vlm_and_does_not_request_llm_stats(monkeypatch, 
     server.main()
 
     assert loaded == [('acme/vision-GGUF', {'device_map': 'llama_cpp', 'n_ctx': 0})]
-    # A list because the chat model is now a pool of decoding slots; a VLM
-    # gets exactly one, since media position state is per handle.
-    assert served == [([model], 'vision-GGUF', '127.0.0.1', 9000)]
+    # main() hands over a registry now, not handles: the default model is
+    # loaded eagerly (once -- a VLM keeps media position state per handle, so
+    # it gets one slot) and any others load on demand.
+    names, resident, model_id, host, port = served[0]
+    assert (model_id, host, port) == ('vision-GGUF', '127.0.0.1', 9000)
+    assert names == ['vision-GGUF']
+    assert resident == [model]
     assert model.closed
     assert 'VLM: vision' in capsys.readouterr().out
 
@@ -1529,3 +1536,278 @@ def test_closing_the_pool_closes_every_handle():
 def test_a_pool_needs_at_least_one_handle():
     with pytest.raises(ValueError):
         server.SlotPool([])
+
+
+# ---------------------------------------------------------------------------
+# ModelRegistry -- several named models, loaded on demand
+# ---------------------------------------------------------------------------
+
+
+class NamedModel(FakeModel):
+    """A chat model whose answer says which model answered."""
+
+    def __init__(self, name: str):
+        super().__init__()
+        self.name = name
+        self.closed = False
+
+    def generate(self, _prompt, **_kwargs):
+        profile = SimpleNamespace(stop_reason='eos', prompt_tokens=2, generated_tokens=1)
+        return SimpleNamespace(text=f'answered by {self.name}', profile=profile, logprobs=None)
+
+    def close(self):
+        self.closed = True
+
+
+def _registry(names, **kwargs):
+    """A registry over models that count how often they were loaded."""
+    loads: dict[str, int] = {name: 0 for name in names}
+    opened: dict[str, list] = {name: [] for name in names}
+
+    def loader(spec):
+        loads[spec.name] += 1
+        handles = [NamedModel(spec.name) for _ in range(spec.slots)]
+        opened[spec.name].extend(handles)
+        return handles
+
+    specs = [server.ModelSpec(name=name, source=f'/models/{name}') for name in names]
+    return server.ModelRegistry(specs, loader=loader, **kwargs), loads, opened
+
+
+def test_a_model_loads_when_it_is_first_named_and_not_before():
+    registry, loads, _ = _registry(['alpha', 'beta'])
+    try:
+        assert loads == {'alpha': 0, 'beta': 0}
+        with registry.acquire('beta') as entry:
+            assert entry.name == 'beta'
+        assert loads == {'alpha': 0, 'beta': 1}
+        # Still resident, so naming it again is free.
+        with registry.acquire('beta'):
+            pass
+        assert loads['beta'] == 1
+    finally:
+        registry.close()
+
+
+def test_an_unknown_model_is_an_error_only_when_there_is_a_choice():
+    single, _, _ = _registry(['alpha'])
+    several, _, _ = _registry(['alpha', 'beta'])
+    try:
+        # One model: the name cannot route anywhere else, and clients that
+        # hardcode an OpenAI name would break for no gain.
+        assert single.resolve('gpt-4') == 'alpha'
+        assert single.resolve(None) == 'alpha'
+        # Several: answering from the wrong one is the failure to avoid.
+        assert several.resolve(None) == 'alpha'
+        assert several.resolve('beta') == 'beta'
+        with pytest.raises(KeyError):
+            several.resolve('gpt-4')
+        with pytest.raises(ValueError):
+            several.resolve(7)
+    finally:
+        single.close()
+        several.close()
+
+
+def test_the_least_recently_idle_model_is_evicted_over_the_limit():
+    registry, loads, opened = _registry(['alpha', 'beta', 'gamma'], resident_limit=2)
+    try:
+        for name in ('alpha', 'beta'):
+            with registry.acquire(name):
+                pass
+        with registry.acquire('gamma'):
+            pass
+        assert sorted(entry.name for entry in registry.loaded()) == ['beta', 'gamma']
+        assert opened['alpha'][0].closed
+        # Asking for it again reloads it, and pushes out the next-oldest.
+        with registry.acquire('alpha'):
+            pass
+        assert loads['alpha'] == 2
+        assert sorted(entry.name for entry in registry.loaded()) == ['alpha', 'gamma']
+    finally:
+        registry.close()
+
+
+def test_a_model_in_use_is_never_evicted_out_from_under_the_request():
+    registry, _, opened = _registry(['alpha', 'beta'], resident_limit=1)
+    try:
+        with registry.acquire('alpha'):
+            with registry.acquire('beta'):
+                # Over the limit, but neither is idle: staying over beats
+                # closing a model a live request is decoding on.
+                assert len(registry.loaded()) == 2
+                assert not opened['alpha'][0].closed
+        # Both idle now; the next load brings it back to the limit.
+        with registry.acquire('beta'):
+            pass
+        assert [entry.name for entry in registry.loaded()] == ['beta']
+        assert opened['alpha'][0].closed
+    finally:
+        registry.close()
+
+
+def test_an_idle_model_is_given_back_after_the_idle_timeout():
+    registry, loads, opened = _registry(['alpha'], idle_timeout=0.05)
+    try:
+        with registry.acquire('alpha'):
+            pass
+        deadline = time.monotonic() + 5
+        while registry.loaded() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not registry.loaded(), 'the reaper never closed the idle model'
+        assert opened['alpha'][0].closed
+        # It comes back on the next request that names it.
+        with registry.acquire('alpha'):
+            pass
+        assert loads['alpha'] == 2
+    finally:
+        registry.close()
+
+
+def test_closing_the_registry_closes_what_it_loaded():
+    registry, _, opened = _registry(['alpha', 'beta'])
+    with registry.acquire('alpha'):
+        pass
+    registry.close()
+    assert opened['alpha'][0].closed
+    assert opened['beta'] == []       # never loaded, never closed
+    registry.close()                  # idempotent: serve() and main() both call it
+
+
+def test_two_models_cannot_share_a_name():
+    with pytest.raises(ValueError, match='name'):
+        server.ModelRegistry([
+            server.ModelSpec(name='alpha', source='/a'),
+            server.ModelSpec(name='alpha', source='/b'),
+        ])
+
+
+def _routed_server(names, **kwargs):
+    registry, loads, opened = _registry(names, **kwargs)
+    return server.UniRTHTTPServer(
+        ('127.0.0.1', 0), None, names[0], registry=registry
+    ), registry, loads, opened
+
+
+def test_the_model_field_picks_which_model_answers():
+    httpd, registry, _, _ = _routed_server(['alpha', 'beta'])
+    try:
+        status, body = _post_to(httpd, '/v1/chat/completions', {
+            'model': 'beta', 'messages': [{'role': 'user', 'content': 'hi'}],
+        })
+        assert status == 200
+        assert body['choices'][0]['message']['content'] == 'answered by beta'
+        # The reply names the model that actually answered, not the default.
+        assert body['model'] == 'beta'
+    finally:
+        registry.close()
+
+
+def test_a_request_that_names_no_model_gets_the_first_one():
+    httpd, registry, _, _ = _routed_server(['alpha', 'beta'])
+    try:
+        status, body = _post_to(httpd, '/v1/chat/completions', {
+            'messages': [{'role': 'user', 'content': 'hi'}],
+        })
+        assert status == 200
+        assert body['choices'][0]['message']['content'] == 'answered by alpha'
+    finally:
+        registry.close()
+
+
+def test_asking_for_a_model_this_server_does_not_have_is_a_404():
+    """The gap this closes: the field used to be read and dropped, so a client
+    that switched models got the old one's answer with no way to tell."""
+    httpd, registry, loads, _ = _routed_server(['alpha', 'beta'])
+    try:
+        status, body = _post_to(httpd, '/v1/chat/completions', {
+            'model': 'gamma', 'messages': [{'role': 'user', 'content': 'hi'}],
+        })
+        assert status == 404
+        assert 'alpha' in body['error']['message'] and 'beta' in body['error']['message']
+        assert loads == {'alpha': 0, 'beta': 0}   # nothing was loaded to answer wrongly
+    finally:
+        registry.close()
+
+
+def test_models_endpoint_lists_every_configured_model_loaded_or_not():
+    httpd, registry, loads, _ = _routed_server(['alpha', 'beta'])
+    import http.client
+
+    port = httpd.server_address[1]
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            connection.request('GET', '/v1/models')
+            listed = json.loads(connection.getresponse().read())
+        finally:
+            connection.close()
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+        registry.close()
+
+    assert [entry['id'] for entry in listed['data']] == ['alpha', 'beta']
+    # Listing must not load anything: the list is what can be served, not
+    # what happens to be resident.
+    assert loads == {'alpha': 0, 'beta': 0}
+
+
+def test_legacy_completions_routes_on_the_model_field_too():
+    httpd, registry, _, _ = _routed_server(['alpha', 'beta'])
+    try:
+        status, body = _post_to(httpd, '/v1/completions', {
+            'model': 'beta', 'prompt': 'hi',
+        })
+        assert status == 200
+        assert body['model'] == 'beta'
+        assert body['choices'][0]['text'] == 'answered by beta'
+    finally:
+        registry.close()
+
+
+def test_stats_reports_an_unloaded_model_as_unloaded_rather_than_404():
+    """A model given back after its idle timeout is still served; a dashboard
+    polling this must not read that as a missing endpoint."""
+    httpd, registry, loads, _ = _routed_server(['alpha', 'beta'])
+    import http.client
+
+    port = httpd.server_address[1]
+    worker = threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05})
+    worker.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        try:
+            connection.request('GET', '/v1/stats')
+            response = connection.getresponse()
+            body = json.loads(response.read())
+        finally:
+            connection.close()
+    finally:
+        httpd.shutdown()
+        worker.join(timeout=5)
+        httpd.server_close()
+        registry.close()
+
+    assert response.status == 200
+    assert body['loaded_models'] == []
+    assert loads == {'alpha': 0, 'beta': 0}
+
+
+def test_one_model_still_answers_to_whatever_name_the_client_sends():
+    """Compatibility, deliberately: with nothing to route to, rejecting the
+    name would only break clients that hardcode an OpenAI one."""
+    httpd, registry, _, _ = _routed_server(['alpha'])
+    try:
+        status, body = _post_to(httpd, '/v1/chat/completions', {
+            'model': 'gpt-4o-mini', 'messages': [{'role': 'user', 'content': 'hi'}],
+        })
+        assert status == 200
+        # Answered by the model that exists, and said so.
+        assert body['model'] == 'alpha'
+        assert body['choices'][0]['message']['content'] == 'answered by alpha'
+    finally:
+        registry.close()

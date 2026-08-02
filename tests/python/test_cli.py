@@ -114,5 +114,27 @@ def test_serve_cli_forwards_its_options_to_the_server(monkeypatch):
 
 def test_serve_cli_runs_without_a_chat_model():
     arguments = _build_parser().parse_args(['serve', '--embedding-model', 'owner/encoder'])
-    assert arguments.model is None
+    assert arguments.model == []
     assert arguments.embedding_model == 'owner/encoder'
+
+
+def test_serve_cli_forwards_one_model_flag_per_model(monkeypatch):
+    """Several chat models: the server takes a repeated --model, and the
+    request's `model` field picks between them."""
+    import unirt.server as server
+    from unirt.cli import _cmd_serve
+
+    seen = {}
+    monkeypatch.setattr(server, 'main', lambda argv=None: seen.update(argv=argv))
+
+    arguments = _build_parser().parse_args(
+        ['serve', 'small=owner/small', 'big=owner/big', '--max-resident-models', '1']
+    )
+    assert arguments.model == ['small=owner/small', 'big=owner/big']
+    _cmd_serve(arguments)
+
+    argv = seen['argv']
+    assert [argv[index + 1] for index, flag in enumerate(argv) if flag == '--model'] == [
+        'small=owner/small', 'big=owner/big'
+    ]
+    assert argv[argv.index('--max-resident-models') + 1] == '1'

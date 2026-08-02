@@ -473,9 +473,14 @@ def _cmd_serve(arguments: argparse.Namespace) -> int:
     from . import server as _server
 
     forwarded: list[str] = []
-    for name in ('model', 'backend', 'embedding_model', 'embedding_device',
+    # `model` is a list here (several may be served) and one --model per entry
+    # is what the server expects.
+    for entry in getattr(arguments, 'model', None) or []:
+        forwarded += ['--model', str(entry)]
+    for name in ('backend', 'embedding_model', 'embedding_device',
                  'rerank_model', 'rerank_device', 'host', 'port', 'n_ctx',
-                 'api_key', 'max_queued_requests', 'slots', 'slot_timeout'):
+                 'api_key', 'max_queued_requests', 'slots', 'slot_timeout',
+                 'max_resident_models', 'model_idle_timeout'):
         value = getattr(arguments, name, None)
         if value is not None:
             forwarded += [f"--{name.replace('_', '-')}", str(value)]
@@ -723,8 +728,10 @@ def _build_parser() -> argparse.ArgumentParser:
         'serve',
         help='Run the OpenAI-compatible HTTP server',
     )
-    serve.add_argument('model', nargs='?', help='Chat model; optional if a '
-                                                'retrieval model is given')
+    serve.add_argument('model', nargs='*', metavar='[NAME=]MODEL',
+                       help='Chat model; optional if a retrieval model is '
+                            'given. Repeat it to serve several, which the '
+                            '"model" field of a request then picks between')
     serve.add_argument('--backend', choices=['llama_cpp', 'mlx'], default='llama_cpp')
     serve.add_argument('--embedding-model', help='Text encoder for /v1/embeddings')
     serve.add_argument('--embedding-device', default='auto')
@@ -739,6 +746,11 @@ def _build_parser() -> argparse.ArgumentParser:
                        help='requests that may decode at the same time')
     serve.add_argument('--slot-timeout', type=float, default=120.0)
     serve.add_argument('--max-queued-requests', type=int, default=8)
+    serve.add_argument('--max-resident-models', type=int, default=0,
+                       help='models that may be loaded at once (0: no limit)')
+    serve.add_argument('--model-idle-timeout', type=float, default=0.0,
+                       help='seconds before an unused model is given back '
+                            '(0: never)')
     serve.set_defaults(func=_cmd_serve)
 
     listing = commands.add_parser('ls', help='List cached models or show one manifest')

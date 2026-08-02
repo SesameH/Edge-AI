@@ -239,10 +239,11 @@ only ever learned this endpoint. It takes a string or an array of strings
 means something else is worse than an error.
 
 `--slots N` lets N requests decode at the same time. Each slot is its own KV
-cache over the same weights — the llama.cpp plugin shares a loaded model
-between every handle on the same file, so a slot costs a context, not a second
-copy of the model (measured on a 138 MB Q8_0: +204 MB for the first handle,
-+16 MB for each one after).
+cache over the same weights — both text plugins share a loaded model between
+every handle on the same file, so a slot costs a context, not a second copy of
+the model (llama.cpp, 138 MB Q8_0: +204 MB for the first handle, +16 MB for
+each one after; MLX, 269 MB bf16: 287 MB of device memory for one slot, 329 MB
+for four).
 
 What that buys is not aggregate throughput — one decode already saturates the
 device, so four concurrent requests finish in about the time one batch would.
@@ -258,6 +259,37 @@ The default is 1, which is the old behaviour: a slot is real memory, and on a
 7B with a long context four of them is several GB. Requests are routed to the
 slot that already holds their conversation, so a continuing chat prefills only
 its new turn instead of landing on a stranger's cache.
+
+### Several models at once
+
+`--model` may be given more than once, and the `model` field of a request then
+picks between them:
+
+```sh
+PYTHONPATH=$PWD/bindings/python python3 -m unirt.server \
+    --model small=models/SmolLM2-135M-Instruct-Q8_0.gguf \
+    --model gemma=models/gemma-3-270m-it-Q8_0.gguf \
+    --max-resident-models 1
+```
+
+`NAME=PATH` sets the name clients use; without it the name is the path's last
+component. `/v1/models` lists them all, the first is the default for requests
+that name no model, and a name this server does not have is a 404 rather than
+a silent answer from whichever model happened to be loaded.
+
+With one model configured the field is not checked — there is nothing else it
+could route to, and clients that hardcode an OpenAI model name would break for
+no gain.
+
+Only the default model loads at startup; the others load when a request first
+names them, so configuring a model costs nothing until it is used.
+`--max-resident-models N` closes the least recently used idle model when an
+N+1th is needed, and `--model-idle-timeout S` gives one back after S seconds
+of disuse. Both are off by default, which keeps every model that has been
+asked for. A model in use is never closed out from under its request. On a
+Mac with the two models above, `--max-resident-models 1` holds ~440 MB against
+~1.26 GB for both resident, and a GGUF reload off warm page cache costs about
+0.2 s.
 
 Both endpoints report log-probabilities: `logprobs: true` with an optional
 `top_logprobs: N` on chat, `logprobs: N` on `/v1/completions` (the two carry
