@@ -511,6 +511,12 @@ typedef struct {
      * is skipped entirely); N > 0 also reports the N most likely alternatives
      * that step. Capped by the plugin at the vocabulary size. */
     int32_t logprobs;
+    /* Tokens the draft model proposes per verification round when one was
+     * loaded (unirt_LlmCreateInput::draft_model_path). 0 = the plugin's
+     * default, < 0 = speculation off for this request. Ignored when no draft
+     * model is attached. Larger is not better: every rejected token is work
+     * the target model did and threw away. */
+    int32_t n_draft;
 } unirt_GenerationConfig;
 
 /**
@@ -547,6 +553,13 @@ typedef struct {
     unirt_ModelConfig config;         /** Load-time settings */
     unirt_PluginId    plugin_id;      /** Backend to load the model with */
     const char*        device_id;      /** Concrete device id; NULL = plugin default */
+    /** A small model of the same vocabulary, used to propose tokens that this
+     *  model then verifies in one batch (speculative decoding). Optional; NULL
+     *  disables it. The plugin loads and owns it -- it is an implementation
+     *  detail of this handle, not a second model the caller can talk to.
+     *  Rejected at load time if its vocabulary differs, since the proposals
+     *  would be meaningless token ids. */
+    unirt_Path        draft_model_path;
 } unirt_LlmCreateInput;
 
 /**

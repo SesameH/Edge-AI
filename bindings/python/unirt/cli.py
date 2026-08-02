@@ -477,7 +477,7 @@ def _cmd_serve(arguments: argparse.Namespace) -> int:
     # is what the server expects.
     for entry in getattr(arguments, 'model', None) or []:
         forwarded += ['--model', str(entry)]
-    for name in ('backend', 'embedding_model', 'embedding_device',
+    for name in ('backend', 'draft_model', 'embedding_model', 'embedding_device',
                  'rerank_model', 'rerank_device', 'host', 'port', 'n_ctx',
                  'api_key', 'max_queued_requests', 'slots', 'slot_timeout',
                  'max_resident_models', 'model_idle_timeout'):
@@ -744,6 +744,9 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument('--no-prefix-cache', action='store_true')
     serve.add_argument('--slots', type=int, default=1,
                        help='requests that may decode at the same time')
+    serve.add_argument('--draft-model',
+                       help='small same-vocabulary model that proposes tokens '
+                            'for the chat model to verify (speculative decoding)')
     serve.add_argument('--slot-timeout', type=float, default=120.0)
     serve.add_argument('--max-queued-requests', type=int, default=8)
     serve.add_argument('--max-resident-models', type=int, default=0,

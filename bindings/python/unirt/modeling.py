@@ -525,6 +525,7 @@ class UniRTLLM(_NativeModel):
         sliding_window_n_keep: int = 0,
         n_past: int = 0,
         logprobs: int = 0,
+        n_draft: int = 0,
         **kwargs,
     ) -> GenerateOutput | TextIteratorStreamer:
         self._require_open()
@@ -532,6 +533,10 @@ class UniRTLLM(_NativeModel):
             raise TypeError('logprobs must be an integer')
         if not 0 <= logprobs <= _INT32_MAX:
             raise ValueError('logprobs must be between 0 and the native int32 maximum')
+        if not isinstance(n_draft, int) or isinstance(n_draft, bool):
+            raise TypeError('n_draft must be an integer')
+        if not -1 <= n_draft <= _INT32_MAX:
+            raise ValueError('n_draft must be -1 (off), 0 (default), or a positive count')
         stops = _validate_common_generate_args(
             prompt,
             max_new_tokens,
@@ -566,6 +571,10 @@ class UniRTLLM(_NativeModel):
             n_past,
         )
         config.logprobs = logprobs
+        # Only means anything when the model was opened with draft_model; the
+        # plugin ignores it otherwise. Negative turns speculation off for this
+        # request without giving up the loaded draft.
+        config.n_draft = n_draft
         # No collector means no callback, and the plugin then skips the
         # per-token softmax over the whole vocabulary entirely.
         collector = _LogprobCollector() if logprobs > 0 else None

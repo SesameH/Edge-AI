@@ -31,7 +31,13 @@ namespace unirt::logging {
 
 /** Render one argument. C strings print their text; every other pointer
  *  prints as an address, so struct pointers in trace logs are cheap and can
- *  never dereference null. */
+ *  never dereference null.
+ *
+ *  Because every argument becomes a string before the pattern is applied,
+ *  log patterns take plain `{}` only. A numeric spec like `{:.1f}` compiles
+ *  -- fmt checks it against the argument's original type -- and then throws
+ *  "invalid format specifier" at runtime, when the argument it actually gets
+ *  is a string. Format the value yourself if you need a particular shape. */
 template <typename Arg>
 inline auto printable(Arg value) {
     if constexpr (std::is_pointer_v<Arg>) {

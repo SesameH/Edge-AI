@@ -459,6 +459,7 @@ class _LoadPlan:
     plugin_id: str | None
     device_id: str | None
     config: unirt_ModelConfig
+    draft_model_path: str | None
     meta: dict
 
 
@@ -474,6 +475,7 @@ def _prepare_load(
     hf_token: str | None,
     progress: ProgressCallback | bool | None,
     kwargs: dict,
+    draft_model: str | None = None,
 ) -> _LoadPlan:
     ensure_init()
     model_path, discovered_mmproj, discovered_tokenizer, paths = _resolve_model_sources(
@@ -498,6 +500,17 @@ def _prepare_load(
 
     resolved_tokenizer = tokenizer_path or discovered_tokenizer
     config = _build_model_config(n_ctx, n_gpu_layers, **kwargs)
+
+    # The draft model goes through the same resolution as the main one, so a
+    # Hub id works for it too; it is loaded inside the plugin rather than
+    # handed back as a second handle, because it is this model's own machinery
+    # and not something the caller generates with.
+    draft_source = None
+    if draft_model:
+        draft_source, _, _, _ = _resolve_model_sources(
+            draft_model, precision, hf_token, progress, None
+        )
+        _validate_runtime_for_model(plugin_id, draft_source)
     return _LoadPlan(
         resolved_name=resolved_name,
         model_path=model_path,
@@ -506,6 +519,7 @@ def _prepare_load(
         plugin_id=plugin_id,
         device_id=device_id,
         config=config,
+        draft_model_path=draft_source,
         meta={
             'model_name': resolved_name,
             'backend': plugin_id,
@@ -529,6 +543,9 @@ def _create_llm_handle(plan: _LoadPlan) -> UniRTLLM:
         config=plan.config,
         plugin_id=plan.plugin_id.encode('utf-8') if plan.plugin_id else None,
         device_id=plan.device_id.encode('utf-8') if plan.device_id else None,
+        draft_model_path=(
+            plan.draft_model_path.encode('utf-8') if plan.draft_model_path else None
+        ),
     )
     handle = c_void_p()
     _check(load_library().unirt_llm_create(byref(input_value), byref(handle)))
@@ -854,6 +871,7 @@ class AutoModelForCausalLM:
         tokenizer_path: str | None = None,
         hf_token: str | None = None,
         progress: ProgressCallback | bool | None = None,
+        draft_model: str | None = None,
         **kwargs,
     ) -> UniRTLLM | UniRTVLM:
         plan = _prepare_load(
@@ -868,7 +886,10 @@ class AutoModelForCausalLM:
             hf_token,
             progress,
             kwargs,
+            draft_model=draft_model,
         )
+        if draft_model and plan.mmproj_path:
+            raise ValueError('draft_model is text-only; this model loads as a VLM')
         cache_key = model_name or model_name_or_path
         if _is_vlm(plan.mmproj_path, cache_key, plan.model_path):
             _require_vlm_backend(plan.plugin_id)

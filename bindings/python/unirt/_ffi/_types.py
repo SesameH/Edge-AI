@@ -118,6 +118,7 @@ class unirt_GenerationConfig(Structure):
         ('sliding_window', c_bool),
         ('sliding_window_n_keep', c_int32),
         ('logprobs', c_int32),
+        ('n_draft', c_int32),
     ]
 
 
@@ -143,6 +144,7 @@ class unirt_LlmCreateInput(Structure):
         ('config', unirt_ModelConfig),
         ('plugin_id', c_char_p),
         ('device_id', c_char_p),
+        ('draft_model_path', c_char_p),
     ]
 
 

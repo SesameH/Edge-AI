@@ -309,6 +309,57 @@ The default is 1, which is the old behaviour: a slot is real memory, and on a
 slot that already holds their conversation, so a continuing chat prefills only
 its new turn instead of landing on a stranger's cache.
 
+### Speculative decoding
+
+A small model of the same vocabulary proposes the next few tokens; the real
+model checks all of them in one batch and keeps the prefix it agrees with,
+plus its own next token. The text is exactly what the big model would have
+produced on its own -- proposals are checked against its logits, never
+trusted -- so this is purely a latency bet.
+
+```sh
+PYTHONPATH=$PWD/bindings/python python3 -m unirt.server \
+    --model models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf \
+    --draft-model models/SmolLM2-135M-Instruct-Q8_0.gguf
+```
+
+```python
+model = AutoModelForCausalLM.from_pretrained(
+    'models/SmolLM2-1.7B-Instruct-Q4_K_M.gguf',
+    draft_model='models/SmolLM2-135M-Instruct-Q8_0.gguf',
+)
+model.generate(prompt, n_draft=8)   # 0 = default (4), -1 = off for this call
+```
+
+**It is not free, and on the pair above it loses.** Measured on an M1, 1.7B
+Q4_K_M verifying a 135M Q8_0, alternating and best-of-four:
+
+| | decode |
+|---|---|
+| speculation off | 37.8 tok/s |
+| `n_draft=4` | 32.7 tok/s |
+
+Same text both ways. The acceptance rate (in the debug log, `UNIRT_LOG=debug`)
+was 46%: the 135M model guesses right about half the time, so nearly half the
+drafting is thrown away. Two things have to hold for the bet to pay, and
+neither does here — the draft has to be *much* cheaper than the target (this
+one costs 6.5 ms against the target's 26 ms, so four proposals already cost a
+full target step), and verifying k tokens has to cost about what verifying one
+costs, which stops being true when the target is small enough to be
+compute-bound rather than bandwidth-bound.
+
+Where it does pay: a large target (7B and up) with a genuinely tiny,
+closely-matched draft, which is exactly the case a phone or a laptop cannot
+hold two of. It ships because the pairing is the user's to choose and the
+acceptance rate tells them whether they chose well -- not because it is a win
+by default. It is off unless `draft_model` is passed, and `n_draft=-1` turns
+it off per request without unloading anything.
+
+Not combined with grammars or `logprobs`: both fall back to plain decoding.
+A grammar rejects most of what an unconstrained draft proposes, and logprobs
+are read from the logits of the step that produced the token, which a
+verification batch overwrites before anything reads them.
+
 ### Several models at once
 
 `--model` may be given more than once, and the `model` field of a request then

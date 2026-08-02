@@ -275,3 +275,106 @@ class TestSharedWeights:
             ), 'a closed handle left its weights resident'
         finally:
             second.close()
+
+
+class TestSpeculativeDecoding:
+    """A draft model changes how tokens are produced, never which ones.
+
+    The target verifies every proposal against its own logits and keeps only
+    what it agrees with, so speculation is an optimisation with an exact
+    correctness criterion: same prompt, same settings, same text.
+    """
+
+    @staticmethod
+    def _prompt(model):
+        return model._apply_chat_template(
+            [{'role': 'user', 'content': 'Write two sentences about the sea.'}],
+            True, False, None,
+        )
+
+    @pytest.fixture(scope='class')
+    def self_drafting(self, sdk):
+        """The model drafting for itself.
+
+        Not a speedup -- drafting costs exactly what it saves -- but the
+        sharpest correctness test available with one model: every proposal
+        should be accepted, which is precisely the path where a mistake in the
+        verification arithmetic or the KV rollback has nowhere to hide.
+        """
+        from unirt.auto import AutoModelForCausalLM
+
+        path = model_path('gguf')
+        model = AutoModelForCausalLM.from_pretrained(
+            path, device_map='llama_cpp', n_ctx=1024, draft_model=path
+        )
+        yield model
+        model.close()
+
+    def test_speculation_does_not_change_the_answer(self, llama_model, self_drafting):
+        llama_model.reset()
+        prompt = self._prompt(llama_model)
+        plain = llama_model.generate(prompt, max_new_tokens=48, temperature=0.0)
+        self_drafting.reset()
+        speculated = self_drafting.generate(prompt, max_new_tokens=48, temperature=0.0)
+        assert speculated.text == plain.text
+        assert speculated.profile.generated_tokens == plain.profile.generated_tokens
+
+    def test_stop_sequences_still_stop(self, self_drafting):
+        """A stop can land in the middle of a verified batch, which is the one
+        place the token loop has to stop early on tokens already in the KV."""
+        self_drafting.reset()
+        out = self_drafting.generate(
+            self._prompt(self_drafting), max_new_tokens=48, temperature=0.0, stop=['sea']
+        )
+        assert out.profile.stop_reason == 'stop_sequence'
+        assert 'sea' not in out.text
+
+    def test_the_handle_still_works_for_the_next_turn(self, self_drafting):
+        """Rolling back rejected tokens must leave the KV and the transcript
+        agreeing, or the next turn reuses a prefix that is not there."""
+        prompt = self._prompt(self_drafting)
+        self_drafting.reset()
+        first = self_drafting.generate(prompt, max_new_tokens=24, temperature=0.0)
+        second = self_drafting.generate(prompt, max_new_tokens=24, temperature=0.0)
+        assert first.text == second.text
+
+    def test_speculation_can_be_turned_off_per_request(self, self_drafting):
+        self_drafting.reset()
+        prompt = self._prompt(self_drafting)
+        with_draft = self_drafting.generate(prompt, max_new_tokens=32, temperature=0.0)
+        self_drafting.reset()
+        without = self_drafting.generate(
+            prompt, max_new_tokens=32, temperature=0.0, n_draft=-1
+        )
+        assert with_draft.text == without.text
+
+    def test_logprobs_and_grammars_still_work_with_a_draft_attached(self, self_drafting):
+        """Both fall back to plain decoding -- the results have to be the same
+        as if no draft had been loaded at all."""
+        import json
+
+        self_drafting.reset()
+        scored = self_drafting.generate(
+            self._prompt(self_drafting), max_new_tokens=8, temperature=0.0, logprobs=2
+        )
+        assert scored.logprobs and len(scored.logprobs) == 8
+        self_drafting.reset()
+        constrained = self_drafting.generate(
+            self._prompt(self_drafting), max_new_tokens=48, temperature=0.0,
+            json_schema={'type': 'object', 'properties': {'a': {'type': 'string'}},
+                         'required': ['a']},
+        )
+        assert 'a' in json.loads(constrained.text)
+
+    def test_a_draft_model_with_a_different_vocabulary_is_refused(self, sdk):
+        """Proposals are token ids. Against a different vocabulary they are
+        different words, so this cannot be allowed to load and silently
+        produce nonsense the target then has to reject every time."""
+        from unirt.auto import AutoModelForCausalLM
+        from unirt._ffi._api import UniRTError
+
+        with pytest.raises(UniRTError):
+            AutoModelForCausalLM.from_pretrained(
+                model_path('gguf'), device_map='llama_cpp', n_ctx=512,
+                draft_model=model_path('gguf_bos'),
+            ).close()

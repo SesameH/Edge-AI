@@ -445,6 +445,7 @@ class ModelSpec:
     backend: str = 'llama_cpp'
     n_ctx: int = 0
     slots: int = 1
+    draft: str | None = None
 
 
 class _Resident:
@@ -472,21 +473,20 @@ class _Resident:
 
 def load_slots(spec: ModelSpec) -> list:
     """Open a model's handles: one per decoding slot, over shared weights."""
-    first = AutoModelForCausalLM.from_pretrained(
-        spec.source, device_map=spec.backend, n_ctx=spec.n_ctx
-    )
+    def open_one():
+        return AutoModelForCausalLM.from_pretrained(
+            spec.source, device_map=spec.backend, n_ctx=spec.n_ctx,
+            **({'draft_model': spec.draft} if spec.draft else {}),
+        )
+
+    first = open_one()
     if isinstance(first, UniRTVLM):
         # Media position state is per handle, so a VLM gets exactly one slot
         # whatever was asked for.
         if spec.slots > 1:
             print(f'note: {spec.name} is a VLM and gets one slot, not {spec.slots}')
         return [first]
-    return [first] + [
-        AutoModelForCausalLM.from_pretrained(
-            spec.source, device_map=spec.backend, n_ctx=spec.n_ctx
-        )
-        for _ in range(spec.slots - 1)
-    ]
+    return [first] + [open_one() for _ in range(spec.slots - 1)]
 
 
 class ModelRegistry:
@@ -1838,6 +1838,15 @@ def main(argv: list[str] | None = None) -> None:
              'for the first to finish',
     )
     ap.add_argument(
+        '--draft-model',
+        help='a small model of the same vocabulary that proposes tokens for '
+             '--model to verify in batches (speculative decoding). Same text '
+             'either way -- the target keeps only what it agrees with -- so '
+             'this is purely a latency bet, and it only pays when the draft '
+             'is much cheaper than the target and agrees with it often. '
+             'Applies to every --model given',
+    )
+    ap.add_argument(
         '--slot-timeout',
         type=float,
         default=120.0,
@@ -1913,6 +1922,7 @@ def main(argv: list[str] | None = None) -> None:
             backend=args.backend,
             n_ctx=args.n_ctx,
             slots=args.slots,
+            draft=args.draft_model,
         )
 
     registry = None

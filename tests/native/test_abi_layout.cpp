@@ -92,6 +92,7 @@ int main() {
     FIELD(unirt_GenerationConfig, sliding_window);
     FIELD(unirt_GenerationConfig, sliding_window_n_keep);
     FIELD(unirt_GenerationConfig, logprobs);
+    FIELD(unirt_GenerationConfig, n_draft);
     end_struct();
 
     BEGIN(unirt_ModelConfig);
@@ -113,6 +114,7 @@ int main() {
     FIELD(unirt_LlmCreateInput, config);
     FIELD(unirt_LlmCreateInput, plugin_id);
     FIELD(unirt_LlmCreateInput, device_id);
+    FIELD(unirt_LlmCreateInput, draft_model_path);
     end_struct();
 
     BEGIN(unirt_LlmGenerateInput);
