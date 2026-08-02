@@ -92,6 +92,16 @@ mkdir -p models/all-MiniLM-L6-v2-GGUF && cd models/all-MiniLM-L6-v2-GGUF && \
 mkdir -p models && curl -L -o models/gemma-3-270m-it-Q8_0.gguf \
   "https://huggingface.co/ggml-org/gemma-3-270m-it-GGUF/resolve/main/gemma-3-270m-it-Q8_0.gguf"
 
+# 5b3. optional: the same encoder in ONNX form, so the cross-backend
+#      conformance suite can compare the two embedding backends against each
+#      other (and exercise the Core ML provider)
+mkdir -p models/all-MiniLM-L6-v2-onnx && cd models/all-MiniLM-L6-v2-onnx && \
+  for f in tokenizer.json tokenizer_config.json config.json special_tokens_map.json; do \
+    curl -sLO "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/$f"; done && \
+  curl -sL -o model.onnx \
+    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx" \
+  && cd ../..
+
 # 5c. optional: a GGUF reranker model (llama_cpp's LLAMA_POOLING_TYPE_RANK;
 #     no tokenizer.json needed — rerank() tokenizes natively via the GGUF's
 #     own vocab)

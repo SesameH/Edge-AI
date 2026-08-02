@@ -17,6 +17,10 @@ MODELS = {
     # the suite exercises the BOS path at all -- a bug that dropped BOS from
     # every turn after the first passed the whole suite. Gemma sets it true.
     'gguf_bos': os.path.join(REPO_ROOT, 'models', 'gemma-3-270m-it-Q8_0.gguf'),
+    # The same encoder in both formats, so the two embedding backends can be
+    # compared against each other rather than only against themselves.
+    'encoder_gguf': os.path.join(REPO_ROOT, 'models', 'all-MiniLM-L6-v2-GGUF'),
+    'encoder_onnx': os.path.join(REPO_ROOT, 'models', 'all-MiniLM-L6-v2-onnx'),
 }
 
 
