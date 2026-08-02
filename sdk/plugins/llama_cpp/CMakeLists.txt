@@ -27,6 +27,22 @@ if(UNIRT_LLAMA_CPU_VARIANTS)
         message(FATAL_ERROR
             "UNIRT_LLAMA_CPU_VARIANTS: ggml defines no CPU variant set for ARM on Windows")
     endif()
+    # ggml's ARM-on-Linux set reaches armv9.2+sme, which GCC only understands
+    # from 14 (Clang from 18). An older toolchain gets no diagnostic until it
+    # is a hundred translation units into the build and cc1 rejects the
+    # -march string, which reads as a broken checkout rather than a compiler
+    # that is too old. manylinux_2_28 ships GCC 14; Ubuntu 24.04's default
+    # GCC 13 does not.
+    if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        include(CheckCCompilerFlag)
+        check_c_compiler_flag("-march=armv9.2-a+sme" UNIRT_CC_ACCEPTS_ARM_SME)
+        if(NOT UNIRT_CC_ACCEPTS_ARM_SME)
+            message(FATAL_ERROR
+                "UNIRT_LLAMA_CPU_VARIANTS: ${CMAKE_C_COMPILER_ID} "
+                "${CMAKE_C_COMPILER_VERSION} rejects -march=armv9.2-a+sme, which ggml's "
+                "ARM variant set needs. Use GCC 14+/Clang 18+, or leave the option off.")
+        endif()
+    endif()
     set(GGML_CPU_ALL_VARIANTS ON)
     set(_unirt_backend_dl ON)
 endif()

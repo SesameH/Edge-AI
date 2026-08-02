@@ -196,7 +196,10 @@ llama_cpp: ggml backends registered from …/lib/llama_cpp:
 ```
 
 Not supported for ARM on Windows, where ggml defines no variant set; that
-wheel targets armv8.7-a directly.
+wheel targets armv8.7-a directly. On ARM Linux the set reaches `armv9.2+sme`,
+which needs GCC 14 or Clang 18 — configure refuses an older compiler up front
+rather than failing a hundred translation units in (Ubuntu 24.04's default GCC
+13 is too old; the manylinux image the wheels are built in has 14).
 
 ## Quick test
 
