@@ -90,6 +90,12 @@ class BatchEngine {
     /** Tokens one sequence may hold. Not llama_n_ctx: that is the whole pool. */
     int32_t context_size() const { return context_size_; }
     int32_t batch_size() const { return batch_size_; }
+    /** The largest batch the backend actually evaluates in one go. A logical
+     *  batch bigger than this is split into several of these internally, so it
+     *  is the natural unit for a prefill chunk: smaller pays round overhead
+     *  for no backend benefit, larger only merges work that was going to be
+     *  split anyway, into a round nobody else can join. */
+    int32_t ubatch_size() const { return ubatch_size_; }
     int32_t capacity() const { return capacity_; }
 
     /** True when this engine can only ever have one handle on it, which is
@@ -115,8 +121,44 @@ class BatchEngine {
      * comes back and finds the engine idle, and the sequences degenerate into
      * taking turns at one token each, which is slower than not sharing at all.
      */
-    void join();
-    void leave();
+    void join(int32_t sequence);
+    void leave(int32_t sequence);
+
+    /**
+     * Tell the engine where to find this sequence's transcript, so another
+     * sequence can look for a prefix worth borrowing. The vector belongs to
+     * the handle and is only ever written by the handle's own thread -- the
+     * engine reads it under its lock, and only for a sequence that is not
+     * between join() and leave(), which is exactly when nothing is writing.
+     */
+    void register_transcript(int32_t sequence, const std::vector<llama_token>* transcript);
+
+    /**
+     * Take another sequence's cached prefix instead of evaluating it again.
+     *
+     * Four clients arriving with the same system prompt is the ordinary shape
+     * of serving, and each of them prefilling it costs the same work over
+     * again -- measured 8.05 s for four against 1.88 s for one, on a
+     * 1854-token prompt. With a unified cache llama_memory_seq_cp does not
+     * copy anything: it adds this sequence's id to cells that are already
+     * there, so the prefix is evaluated once and held once however many
+     * sequences read it.
+     *
+     * `already` is what this sequence could reuse from its own cache; a donor
+     * only wins if it beats that. Returns how many leading tokens of `wanted`
+     * are now in this sequence's KV, or 0 when nothing was borrowed (in which
+     * case the sequence's own cache is untouched).
+     */
+    size_t borrow_prefix(
+        int32_t sequence, const std::vector<llama_token>& wanted, size_t already);
+
+    /**
+     * Leading tokens of `sequence` whose cells another sequence may also be
+     * pointing at. Context shifting must not touch them: llama.cpp shifts a
+     * cell's position for every sequence holding it, so evicting inside a
+     * shared region would silently renumber somebody else's conversation.
+     */
+    int32_t shared_prefix(int32_t sequence) const;
 
     /** Give one back, dropping whatever it had in the KV cache. */
     void release(int32_t sequence);
@@ -147,6 +189,11 @@ class BatchEngine {
         llama_context* context() const { return engine_.context_.get(); }
         llama_memory_t memory() const { return llama_get_memory(engine_.context_.get()); }
 
+        /** This sequence's KV now ends at `length`, so nothing past there can
+         *  still be shared with anybody. Call after any trim, or the sequence
+         *  keeps refusing to evict a region it no longer holds. */
+        void truncated(int32_t sequence, int32_t length) { engine_.forget_shared(sequence, length); }
+
        private:
         BatchEngine&                 engine_;
         std::unique_lock<std::mutex> lock_;
@@ -171,6 +218,8 @@ class BatchEngine {
     // Called with the lock held; releases nothing. Runs one round over the
     // submissions queued right now and marks each of them served.
     void run_round(std::unique_lock<std::mutex>& lock);
+    // Lock already held.
+    void forget_shared(int32_t sequence, int32_t length);
     // Pack `participants` into the batch and decode. Returns llama_decode's code.
     int32_t attempt(const std::vector<Submission*>& participants);
     void    publish(const std::vector<Submission*>& participants, int32_t code);
@@ -181,12 +230,21 @@ class BatchEngine {
     int32_t     capacity_     = 1;
     int32_t     context_size_ = 0;
     int32_t     batch_size_   = 0;
+    int32_t     ubatch_size_  = 0;
     int32_t     vocab_size_   = 0;
 
     mutable std::mutex       mutex_;
     std::condition_variable  round_;
     std::vector<Submission*> queue_;
     std::vector<bool>        claimed_;
+    // Inside a generation: worth waiting for at round time, and off limits as
+    // a prefix donor, since its transcript is being written as we look.
+    std::vector<bool>        generating_;
+    // Each handle's own token transcript, borrowed by pointer. Read only for
+    // a sequence that is not generating -- see register_transcript().
+    std::vector<const std::vector<llama_token>*> transcripts_;
+    // Leading cells of each sequence that some other sequence may also hold.
+    std::vector<int32_t> shared_prefix_;
     // Sequences inside a generation, and therefore worth waiting for.
     int32_t active_ = 0;
     // How long the last decode took. A batch-mate that cannot get from

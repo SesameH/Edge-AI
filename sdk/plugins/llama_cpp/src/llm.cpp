@@ -490,6 +490,10 @@ int32_t LlamaCppLlm::create(const unirt_LlmCreateInput* input) {
     clear_model();
     engine_ = std::move(engine);
     sequence_ = sequence;
+    // history_ mirrors this sequence's KV, which makes it the answer to
+    // "what does slot N already hold" for a sibling looking to borrow a
+    // prefix rather than evaluate it again.
+    engine_->register_transcript(sequence_, &history_);
     vocab_ = llama_model_get_vocab(engine_->model().get());
     devices_ = std::move(selected_devices);
     template_override_ = std::move(requested_template);
@@ -535,6 +539,7 @@ int32_t LlamaCppLlm::reset() {
     // This sequence only. The context may be holding three other conversations
     // that have nothing to do with this handle being reset.
     llama_memory_seq_rm(access.memory(), sequence_, -1, -1);
+    access.truncated(sequence_, 0);
     history_.clear();
     last_logits_ = nullptr;
     llama_perf_context_reset(access.context());
@@ -567,6 +572,7 @@ int32_t LlamaCppLlm::load_kv_cache(
     std::vector<llama_token> loaded(static_cast<size_t>(context_size_));
     size_t                   count = 0;
     auto                     access = engine_->access();
+    access.truncated(sequence_, 0);
     last_logits_ = nullptr;
     if (!llama_state_seq_load_file(
             access.context(), input->path, sequence_, loaded.data(), loaded.size(), &count)) {
@@ -675,7 +681,11 @@ int32_t LlamaCppLlm::evict_for_space(int32_t incoming) {
     // this backend used to ignore that and shift regardless.
     if (!shift_supported_ || !sliding_window_) return 0;
     const int32_t cached = static_cast<int32_t>(history_.size());
-    const int32_t head   = std::min(pinned_head_, cached);
+    // Past the pinned head, and past anything a sibling sequence borrowed:
+    // llama.cpp renumbers a cell for every sequence holding it, so shifting
+    // inside a shared region would move somebody else's tokens.
+    const int32_t head =
+        std::min(std::max(pinned_head_, engine_->shared_prefix(sequence_)), cached);
     // Free at least enough for the incoming tokens, but take half of the
     // evictable region so we do not shift on every subsequent token.
     const int32_t deficit  = cached + incoming - context_size_ + 1;
@@ -687,6 +697,7 @@ int32_t LlamaCppLlm::evict_for_space(int32_t incoming) {
         auto access = engine_->access();
         llama_memory_seq_rm(access.memory(), sequence_, head, head + n_evict);
         llama_memory_seq_add(access.memory(), sequence_, head + n_evict, cached, -n_evict);
+        access.truncated(sequence_, cached - n_evict);
     }
     history_.erase(history_.begin() + head, history_.begin() + head + n_evict);
     UNIRT_LOG_INFO(
@@ -698,14 +709,35 @@ int32_t LlamaCppLlm::evict_for_space(int32_t incoming) {
 int32_t LlamaCppLlm::decode(const llama_token* tokens, int32_t count) {
     if (count <= 0) return UNIRT_SUCCESS;
     last_logits_ = nullptr;
-    // A prompt goes in one chunk per round, so a long prefill on one sequence
-    // would hold the batch for as many rounds as it takes -- but a chunk that
-    // fills the batch outright leaves no room for the other sequences' single
-    // decode tokens, and they would wait the whole prefill out. Leaving a
-    // margin lets them ride along with it.
+    // A submission is one round, so a long prompt submitted whole is a round
+    // the other sequences cannot get into until it finishes -- three streams
+    // stopped dead for 2.0 s on CPU while a fourth request's 2000-token prompt
+    // went through. Chunking it to the physical batch size interleaves them:
+    // each round is one ubatch of the prompt plus everyone else's next token.
+    //
+    // n_ubatch and not a number of our own. Below it the prompt is split into
+    // rounds finer than the backend's own unit of work, which costs round
+    // overhead and buys nothing; above it, ubatches llama.cpp was going to run
+    // separately anyway are welded into a single round that excludes everyone
+    // else. Measured over 64..2044 with a 2000-token prompt arriving beside
+    // three streams, the knee sits exactly there. At n_ubatch (512) the worst
+    // gap a decoder sees falls from 1650 ms to 600 ms on CPU and from 440 ms
+    // to 145 ms on Metal, and the big request's own latency rises 4-5%.
+    // Halving the chunk again takes CPU to 370 ms but costs 20% of that
+    // latency.
+    //
+    // The decoders lose slightly more time in total this way -- four rounds
+    // carrying a chunk cost more than one round carrying the lot. What they
+    // get is that none of it arrives at once: a stream hitches four times for
+    // half a second instead of stopping dead for nearly two.
     const int32_t batch_size = engine_->batch_size();
-    const int32_t chunk_limit =
-        engine_->exclusive() ? batch_size : std::max(1, batch_size - engine_->capacity());
+    int32_t chunk_limit =
+        engine_->exclusive()
+            ? batch_size
+            : std::max(1, std::min(batch_size - engine_->capacity(), engine_->ubatch_size()));
+    if (const char* tune = std::getenv("UNIRT_PREFILL_CHUNK")) {
+        chunk_limit = std::max(1, std::min(batch_size, std::atoi(tune)));
+    }
     for (int32_t offset = 0; offset < count; offset += chunk_limit) {
         const int32_t chunk_size = std::min(chunk_limit, count - offset);
         const llama_pos position = static_cast<llama_pos>(history_.size());
@@ -1022,8 +1054,9 @@ int32_t LlamaCppLlm::generate(
     // n_past > 0 is an explicit rewind to that point; n_past == 0 leaves the
     // cache alone and lets the prefix-reuse pass below decide what survives.
     if (requested_past > 0 && static_cast<size_t>(requested_past) < history_.size()) {
-        if (!llama_memory_seq_rm(
-                engine_->access().memory(), sequence_, requested_past, -1)) {
+        auto access = engine_->access();
+        access.truncated(sequence_, requested_past);
+        if (!llama_memory_seq_rm(access.memory(), sequence_, requested_past, -1)) {
             UNIRT_LOG_ERROR("llama_cpp: backend cannot trim KV cache to n_past={}", requested_past);
             return UNIRT_ERROR_COMMON_NOT_SUPPORTED;
         }
@@ -1055,9 +1088,25 @@ int32_t LlamaCppLlm::generate(
     // Skip re-evaluating whatever prefix of the prompt is already in the KV
     // cache (the common chat pattern resends the whole transcript each turn).
     // Anything cached beyond the shared prefix is stale and gets dropped.
+    // Before deciding what of our own cache survives, see whether a sibling
+    // sequence is holding more of this prompt than we are -- four clients
+    // arriving with the same system prompt is the ordinary shape of serving,
+    // and evaluating it once per client is the ordinary waste. Skipped when
+    // the caller is driving positions itself: n_past > 0 says it knows what
+    // is in the cache, and replacing that underneath it would be a surprise.
+    if (requested_past == 0) {
+        const size_t borrowed = engine_->borrow_prefix(
+            sequence_, prompt, reusable_prefix(prompt));
+        if (borrowed > 0) {
+            history_.assign(prompt.begin(), prompt.begin() + static_cast<ptrdiff_t>(borrowed));
+            last_logits_ = nullptr;
+        }
+    }
+
     const size_t shared = reusable_prefix(prompt);
     if (shared < history_.size()) {
         auto access = engine_->access();
+        access.truncated(sequence_, static_cast<int32_t>(shared));
         last_logits_ = nullptr;
         if (shared == 0) {
             llama_memory_seq_rm(access.memory(), sequence_, -1, -1);
@@ -1104,9 +1153,10 @@ int32_t LlamaCppLlm::generate(
     // hold a round open for. Nothing above this point submits anything.
     struct Membership {
         BatchEngine& engine;
-        explicit Membership(BatchEngine& e) : engine(e) { engine.join(); }
-        ~Membership() { engine.leave(); }
-    } membership(*engine_);
+        int32_t      sequence;
+        Membership(BatchEngine& e, int32_t s) : engine(e), sequence(s) { engine.join(sequence); }
+        ~Membership() { engine.leave(sequence); }
+    } membership(*engine_, sequence_);
 
     const int64_t start_time = monotonic_us();
     int32_t result = decode(fresh_tokens, fresh_count);

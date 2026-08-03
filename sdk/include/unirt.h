@@ -539,6 +539,10 @@ typedef struct {
      * a handle with draft_model_path never shares (speculative verification
      * needs a batch it owns outright). Backends that do not batch ignore it.
      *
+     * Sharing a context also lets the handles share cached prompts: a request
+     * whose prefix an idle sibling already holds points at those cells rather
+     * than evaluating them again.
+     *
      * Two consequences worth knowing. The context is created with n_seq_max
      * times the window asked for, so the memory is the same as N separate
      * contexts and every sequence keeps its full n_ctx. And the sequences

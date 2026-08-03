@@ -13,8 +13,8 @@ libraries for every platform and publishes the Python wheel.
 
   | | throughput | slowest request |
   |---|---|---|
-  | 135M Q8_0, CPU | 85 → 597 tok/s | 6.00 → 0.86 s |
-  | 135M Q8_0, Metal | 180 → 224 tok/s | 2.84 → 2.28 s |
+  | 135M Q8_0, CPU | 84 → 630 tok/s | 6.09 → 0.81 s |
+  | 135M Q8_0, Metal | 183 → 236 tok/s | 2.80 → 2.17 s |
   | 1.7B Q4_K_M, CPU | 8.2 → 75.7 tok/s | 62.2 → 6.8 s |
   | 1.7B Q4_K_M, Metal | 39.9 → 79.7 tok/s | 12.8 → 6.4 s |
 
@@ -33,6 +33,19 @@ libraries for every platform and publishes the Python wheel.
   Available directly as `n_seq_max` on `unirt_ModelConfig` / `from_pretrained`.
   A handle with a draft model keeps a context to itself: speculative
   verification reads several positions of a batch it has to own.
+
+- **Slots lend each other cached prompts.** A request starting on one slot
+  looks for an idle sibling holding a longer prefix of the same prompt and
+  takes it rather than evaluating it again; with a shared pool the cells are
+  pointed at, not copied, so a system prompt is stored once however many slots
+  read it. One client warms an 1854-token system prompt, then three more
+  arrive: 11.67 s -> 0.29 s.
+
+- **Long prompts no longer freeze the other streams.** A prompt is submitted
+  one physical batch (`n_ubatch`) at a time, so a round carries a slice of it
+  plus everyone else's next token. Three streams running, a 2000-token prompt
+  arriving: worst gap between tokens 1650 ms -> 600 ms on CPU, 440 ms -> 145 ms
+  on Metal, for 4-5% on the arriving request's own latency.
 
 ## 0.4.0
 

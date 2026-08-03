@@ -20,11 +20,15 @@ BatchEngine::BatchEngine(
     // the whole shared pool, so it is a ceiling here and not the answer.
     context_size_ = std::min(context_size, static_cast<int32_t>(llama_n_ctx_seq(context_.get())));
     batch_size_   = static_cast<int32_t>(llama_n_batch(context_.get()));
+    ubatch_size_  = static_cast<int32_t>(llama_n_ubatch(context_.get()));
     vocab_size_   = llama_vocab_n_tokens(llama_model_get_vocab(model_.get()));
     // One token slot per position the batch may carry, one sequence id each:
     // a token belongs to exactly one conversation here.
     batch_ = llama_batch_init(batch_size_, 0, 1);
     claimed_.assign(static_cast<size_t>(capacity_), false);
+    generating_.assign(static_cast<size_t>(capacity_), false);
+    transcripts_.assign(static_cast<size_t>(capacity_), nullptr);
+    shared_prefix_.assign(static_cast<size_t>(capacity_), 0);
     logit_copies_.resize(static_cast<size_t>(capacity_));
 }
 
@@ -37,17 +41,86 @@ BatchEngine::~BatchEngine() {
     llama_batch_free(batch_);
 }
 
-void BatchEngine::join() {
+void BatchEngine::join(int32_t sequence) {
     std::lock_guard<std::mutex> lock(mutex_);
     ++active_;
+    if (sequence >= 0 && sequence < capacity_) generating_[static_cast<size_t>(sequence)] = true;
 }
 
-void BatchEngine::leave() {
+void BatchEngine::leave(int32_t sequence) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (active_ > 0) --active_;
+    if (sequence >= 0 && sequence < capacity_) generating_[static_cast<size_t>(sequence)] = false;
     // Somebody may be holding a round open waiting for the sequence that just
     // stopped generating.
     round_.notify_all();
+}
+
+void BatchEngine::register_transcript(
+    int32_t sequence, const std::vector<llama_token>* transcript) {
+    if (sequence < 0 || sequence >= capacity_) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    transcripts_[static_cast<size_t>(sequence)] = transcript;
+}
+
+int32_t BatchEngine::shared_prefix(int32_t sequence) const {
+    if (sequence < 0 || sequence >= capacity_) return 0;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return shared_prefix_[static_cast<size_t>(sequence)];
+}
+
+void BatchEngine::forget_shared(int32_t sequence, int32_t length) {
+    if (sequence < 0 || sequence >= capacity_) return;
+    auto& shared = shared_prefix_[static_cast<size_t>(sequence)];
+    shared = std::min(shared, std::max(length, 0));
+}
+
+size_t BatchEngine::borrow_prefix(
+    int32_t sequence, const std::vector<llama_token>& wanted, size_t already) {
+    if (capacity_ < 2 || sequence < 0 || sequence >= capacity_ || wanted.size() < 2) return 0;
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    round_.wait(lock, [this] { return !busy_; });
+
+    // One token has to be left to evaluate, or there are no logits to sample
+    // the reply from -- the same cap the handle's own prefix reuse applies.
+    const size_t limit = wanted.size() - 1;
+    int32_t      donor = kNoSequence;
+    size_t       best  = already;
+    for (int32_t other = 0; other < capacity_; ++other) {
+        const auto index = static_cast<size_t>(other);
+        if (other == sequence || !claimed_[index] || generating_[index]) continue;
+        const auto* transcript = transcripts_[index];
+        if (!transcript) continue;
+        const size_t reach = std::min(limit, transcript->size());
+        size_t       match = 0;
+        while (match < reach && (*transcript)[match] == wanted[match]) ++match;
+        if (match > best) {
+            best  = match;
+            donor = other;
+        }
+    }
+    if (donor == kNoSequence) return 0;
+
+    // Whatever this sequence had cached is worth less than what it is about to
+    // point at, and the two cannot be spliced: the borrowed cells carry their
+    // own positions from zero.
+    auto* memory = llama_get_memory(context_.get());
+    llama_memory_seq_rm(memory, sequence, -1, -1);
+    llama_memory_seq_cp(memory, donor, sequence, 0, static_cast<llama_pos>(best));
+
+    // Both ends now hold cells the other one can see, and neither may shift
+    // them: llama.cpp moves a cell's position for every sequence that holds
+    // it, so evicting inside this region would renumber the other's tokens
+    // underneath it.
+    shared_prefix_[static_cast<size_t>(sequence)] = static_cast<int32_t>(best);
+    auto& lent = shared_prefix_[static_cast<size_t>(donor)];
+    lent = std::max(lent, static_cast<int32_t>(best));
+
+    UNIRT_LOG_DEBUG(
+        "llama_cpp: sequence {} borrowed {} cached tokens from sequence {}", sequence, best,
+        donor);
+    return best;
 }
 
 int32_t BatchEngine::claim() {
@@ -70,6 +143,9 @@ void BatchEngine::release(int32_t sequence) {
         claimed_[static_cast<size_t>(sequence)] = false;
         --live_;
     }
+    transcripts_[static_cast<size_t>(sequence)]   = nullptr;
+    generating_[static_cast<size_t>(sequence)]    = false;
+    shared_prefix_[static_cast<size_t>(sequence)] = 0;
     logit_copies_[static_cast<size_t>(sequence)].clear();
     logit_copies_[static_cast<size_t>(sequence)].shrink_to_fit();
 }

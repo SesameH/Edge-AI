@@ -241,6 +241,147 @@ def test_saving_and_loading_a_session_moves_one_sequence_only(pool, tmp_path):
     assert QUESTIONS[1][1] in ask(pool[1], QUESTIONS[1][0]).text.lower()
 
 
+# ---------------------------------------------------------------------------
+# Borrowing a sibling's prefix instead of evaluating it again
+# ---------------------------------------------------------------------------
+
+# Long enough that evaluating it is the whole cost of the request, which is
+# what makes the timing assertion below safe by a wide margin.
+SYSTEM = 'You are terse. ' + ' '.join(
+    f'Background fact {index}: the value is {index * 7 % 97}.' for index in range(140))
+
+
+def ask_with_system(model, question, **kwargs):
+    prompt = model._apply_chat_template(
+        [{'role': 'system', 'content': SYSTEM}, {'role': 'user', 'content': question}],
+        True, False, None)
+    kwargs.setdefault('max_new_tokens', 12)
+    kwargs.setdefault('temperature', 0.0)
+    return model.generate(prompt, **kwargs)
+
+
+@pytest.fixture
+def wide_pool(sdk):
+    """Slots with room for a long shared system prompt."""
+    path = model_path('gguf')
+    models = [
+        AutoModelForCausalLM.from_pretrained(
+            path, device_map='llama_cpp', n_ctx=4096, n_seq_max=SLOTS)
+        for _ in range(SLOTS)
+    ]
+    yield models
+    for model in models:
+        model.close()
+
+
+def test_an_idle_sibling_s_prefix_is_taken_rather_than_re_evaluated(wide_pool):
+    """The ordinary shape of serving: several clients, one system prompt. With
+    a unified cache the cells are shared rather than copied, so the second
+    client's prompt costs nothing to put in place.
+
+    Timed, because there is no other outward sign that it happened -- but the
+    measured gap is ~50x on a 1854-token prompt, so a 3x threshold is not a
+    close call on any machine.
+    """
+    import time
+
+    started = time.monotonic()
+    first = ask_with_system(wide_pool[0], QUESTIONS[0][0])
+    cold = time.monotonic() - started
+    assert QUESTIONS[0][1] in first.text.lower()
+
+    started = time.monotonic()
+    second = ask_with_system(wide_pool[1], QUESTIONS[1][0])
+    warm = time.monotonic() - started
+    assert QUESTIONS[1][1] in second.text.lower()
+    assert warm * 3 < cold, f'borrowing saved nothing: {cold:.2f}s then {warm:.2f}s'
+
+
+def test_a_borrowed_prefix_brings_none_of_the_donor_s_own_turn(wide_pool):
+    """Only the shared leading tokens move. Everything the donor decoded after
+    them is its own, and must not appear in the borrower's context."""
+    ask_with_system(wide_pool[0], QUESTIONS[0][0])
+    for index in (1, 2, 3):
+        answer = ask_with_system(wide_pool[index], QUESTIONS[index][0]).text.lower()
+        assert QUESTIONS[index][1] in answer
+        # The donor asked about France; a borrower that inherited its answer
+        # too would be answering that instead of its own question.
+        assert QUESTIONS[0][1] not in answer
+
+
+def test_shifting_never_starts_inside_a_shared_region(sdk):
+    """A sequence that borrowed shares real cells with the one it borrowed
+    from, and llama.cpp renumbers a cell for every sequence holding it
+    (llama_kv_cache::seq_add shifts any cell whose seq set contains the id).
+    Evicting inside a borrowed prefix would therefore renumber the donor's
+    conversation while its own transcript still says otherwise.
+
+    Asserted on the eviction decision rather than on the reply, because the
+    damage is soft: the tokens stay, only their positions move, and a model
+    answering from a corrupted context still mostly answers. Both obvious
+    behavioural tests -- the donor re-asking, the borrower recalling something
+    only the prefix knows -- pass with the guard deliberately removed, the
+    borrower because eviction shortens its transcript too so its next turn
+    simply re-prefills. What does not survive removal is this: the eviction
+    log reports head=4 instead of head=<the borrowed length>.
+    """
+    import logging
+    import re
+
+    from unirt._ffi import _api
+
+    path = model_path('gguf')
+    shared = 'You are terse. ' + ' '.join(
+        f'Background fact {index}: the value is {index}.' for index in range(30))
+
+    def ask(model, question, **kwargs):
+        prompt = model._apply_chat_template(
+            [{'role': 'system', 'content': shared}, {'role': 'user', 'content': question}],
+            True, False, None)
+        kwargs.setdefault('max_new_tokens', 12)
+        kwargs.setdefault('temperature', 0.0)
+        return model.generate(prompt, **kwargs)
+
+    lines: list[str] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = Collect()
+    logger = logging.getLogger('unirt')
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    _api.set_log_level('debug')
+    _api.install_log_callback()
+
+    models = [
+        AutoModelForCausalLM.from_pretrained(
+            path, device_map='llama_cpp', n_ctx=512, n_seq_max=2)
+        for _ in range(2)
+    ]
+    try:
+        assert QUESTIONS[0][1] in ask(models[0], QUESTIONS[0][0]).text.lower()
+        borrower = ask(
+            models[1], 'Count from one to one hundred, one number per line.',
+            max_new_tokens=400, sliding_window=True)
+        assert borrower.text
+        assert borrower.profile.stop_reason != 'context_length', 'nothing was evicted'
+    finally:
+        for model in models:
+            model.close()
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+    borrowed = [int(m) for m in re.findall(r'borrowed (\d+) cached tokens', ' '.join(lines))]
+    assert borrowed, 'the second sequence never borrowed a prefix'
+    heads = [int(m) for m in re.findall(r'context shift evicted \d+ tokens \(head (\d+)', ' '.join(lines))]
+    assert heads, 'the borrower never had to shift its window'
+    assert min(heads) >= max(borrowed), (
+        f'eviction started at {min(heads)}, inside a prefix of {max(borrowed)} shared cells')
+
+
 def test_a_draft_model_keeps_its_own_context(sdk):
     """Speculative decoding verifies several positions of a batch it owns, so
     it cannot share. Asking for both is not an error -- the handle just gets a

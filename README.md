@@ -313,8 +313,8 @@ that. Eight clients, four slots, 64 tokens each:
 
 | | throughput | slowest request |
 |---|---|---|
-| 135M Q8_0, CPU | 85 → **597 tok/s** | 6.00 → **0.86 s** |
-| 135M Q8_0, Metal | 180 → **224 tok/s** | 2.84 → **2.28 s** |
+| 135M Q8_0, CPU | 84 → **630 tok/s** | 6.09 → **0.81 s** |
+| 135M Q8_0, Metal | 183 → **236 tok/s** | 2.80 → **2.17 s** |
 | 1.7B Q4_K_M, CPU | 8.2 → **75.7 tok/s** | 62.2 → **6.8 s** |
 | 1.7B Q4_K_M, Metal | 39.9 → **79.7 tok/s** | 12.8 → **6.4 s** |
 
@@ -323,6 +323,27 @@ earned: separate contexts each build their own thread pool, so four slots ran
 four full pools on eight cores and spent the difference in contention. Split
 the threads by hand and separate contexts reach 281 tok/s on the 135M — the
 batch still doubles that, to 599. Nobody splits them by hand.
+
+Slots also **lend each other their cached prompts**. Several clients arriving
+with the same system prompt is the ordinary shape of serving, and each of them
+evaluating it is the ordinary waste — a sequence starting a request first looks
+for an idle sibling holding a longer prefix of the same prompt and takes it.
+With one shared pool of cells that costs nothing: llama.cpp adds the borrower's
+id to cells that are already there, so the prompt is evaluated once and stored
+once however many slots read it. One client warms a 1854-token system prompt,
+then three more arrive with their own questions:
+
+| | first client | the next three, together |
+|---|---|---|
+| separate contexts | 2.53 s | 11.67 s |
+| one batching context | 2.26 s | **0.29 s** |
+
+A long prompt no longer freezes everyone else either. It is submitted one
+physical batch (`n_ubatch`) at a time, so each round carries a slice of it
+*plus* every other sequence's next token. With three streams running and a
+2000-token prompt arriving, the worst gap between tokens falls from 1650 ms to
+600 ms on CPU and from 440 ms to 145 ms on Metal, for 4–5% on the big request's
+own latency.
 
 Batching also does not remove head-of-line blocking, it just stops the fix
 from costing throughput. A short request arriving behind a long one, on an M1
