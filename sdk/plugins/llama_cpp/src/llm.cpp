@@ -1095,10 +1095,11 @@ int32_t LlamaCppLlm::generate(
     // the caller is driving positions itself: n_past > 0 says it knows what
     // is in the cache, and replacing that underneath it would be a surprise.
     if (requested_past == 0) {
-        const size_t borrowed = engine_->borrow_prefix(
-            sequence_, prompt, reusable_prefix(prompt));
-        if (borrowed > 0) {
-            history_.assign(prompt.begin(), prompt.begin() + static_cast<ptrdiff_t>(borrowed));
+        // history_ is rewritten inside borrow_prefix, under the engine's
+        // lock: it is registered with the engine as this sequence's
+        // transcript, and this handle is not yet inside a generation, so a
+        // sibling looking for a donor could be reading it right now.
+        if (engine_->borrow_prefix(sequence_, prompt, reusable_prefix(prompt), history_) > 0) {
             last_logits_ = nullptr;
         }
     }

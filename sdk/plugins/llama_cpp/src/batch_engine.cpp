@@ -76,7 +76,8 @@ void BatchEngine::forget_shared(int32_t sequence, int32_t length) {
 }
 
 size_t BatchEngine::borrow_prefix(
-    int32_t sequence, const std::vector<llama_token>& wanted, size_t already) {
+    int32_t sequence, const std::vector<llama_token>& wanted, size_t already,
+    std::vector<llama_token>& mine) {
     if (capacity_ < 2 || sequence < 0 || sequence >= capacity_ || wanted.size() < 2) return 0;
 
     std::unique_lock<std::mutex> lock(mutex_);
@@ -116,6 +117,9 @@ size_t BatchEngine::borrow_prefix(
     shared_prefix_[static_cast<size_t>(sequence)] = static_cast<int32_t>(best);
     auto& lent = shared_prefix_[static_cast<size_t>(donor)];
     lent = std::max(lent, static_cast<int32_t>(best));
+
+    // Under the lock, for the same reason the donor's is only read here.
+    mine.assign(wanted.begin(), wanted.begin() + static_cast<ptrdiff_t>(best));
 
     UNIRT_LOG_DEBUG(
         "llama_cpp: sequence {} borrowed {} cached tokens from sequence {}", sequence, best,
@@ -284,11 +288,15 @@ void BatchEngine::publish(const std::vector<Submission*>& participants, int32_t 
         status = DecodeStatus::failed;
     }
 
-    // With a second handle alive, the next round can start before this one's
+    // On a shared engine the next round can start before this one's
     // participants have finished sampling, and llama.cpp's output buffer is
-    // one buffer. Copy each row out while it is still ours. On a lone handle
-    // there is nobody to race and the pointer is handed back as it is.
-    const bool copy = live_ > 1;
+    // one buffer. Copy each row out while it is still ours. Keyed on the
+    // capacity and not on how many handles are live right now: a handle can
+    // be opened on this engine while another is mid-generation, and the one
+    // already holding a pointer into the output buffer would have no idea it
+    // had acquired a neighbour. An exclusive engine has no such neighbour to
+    // acquire, and gets the pointer as it is.
+    const bool copy = capacity_ > 1;
     for (Submission* submission : participants) {
         submission->status = status;
         submission->logits = nullptr;

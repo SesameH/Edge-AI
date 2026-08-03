@@ -66,6 +66,13 @@ void stderr_log_sink(unirt_LogLevel level, const char* message) {
     };
     if (level < 0 || level > UNIRT_LOG_LEVEL_ERROR) return;
     const auto& style = kStyles[level];
+    // One record at a time. The stream itself is safe to share -- the standard
+    // says concurrent writes to it are not a data race -- but a record is four
+    // separate insertions, and with several sequences decoding at once they
+    // arrive shuffled into each other's colour codes. A log that has to be
+    // reassembled by eye is worse than a lock nobody can measure.
+    static std::mutex   sink_mutex;
+    std::lock_guard<std::mutex> lock(sink_mutex);
     std::cerr << style.color << style.tag << message << "\033[0m" << std::endl;
 }
 

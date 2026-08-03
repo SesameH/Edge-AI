@@ -183,9 +183,12 @@ int32_t LlamaCppVlm::create(const unirt_VlmCreateInput* input) {
     if (input->config.n_ubatch > 0) {
         context_params.n_ubatch = static_cast<uint32_t>(input->config.n_ubatch);
     }
-    if (input->config.n_seq_max > 0) {
-        context_params.n_seq_max = static_cast<uint32_t>(input->config.n_seq_max);
-    }
+    // n_seq_max is deliberately not forwarded. It asks for several handles to
+    // decode together, which a VLM cannot do -- media position state is per
+    // handle, so this backend owns exactly one sequence. Passing it on would
+    // only make llama.cpp divide n_ctx by a number of sequences that will
+    // never exist, quietly leaving the caller a quarter of the window it
+    // asked for.
     if (input->config.n_threads > 0) context_params.n_threads = input->config.n_threads;
     if (input->config.n_threads_batch > 0) {
         context_params.n_threads_batch = input->config.n_threads_batch;

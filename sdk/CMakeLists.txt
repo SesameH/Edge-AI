@@ -170,6 +170,23 @@ if(UNIRT_NATIVE_TESTS AND UNIRT_PLUGIN_LLAMA_CPP)
         ENVIRONMENT "UNIRT_PLUGIN_PATH=${CMAKE_SOURCE_DIR}/pkg-unirt/lib")
 endif()
 
+# Several handles hammering one shared context. Built as a native binary so it
+# can be run under ThreadSanitizer: on macOS the sanitizer runtime cannot be
+# loaded into the system Python, so driving the same threads from the bindings
+# would prove nothing. Not registered with ctest -- it is a soak, not a check,
+# and it is only worth its minutes when the batching engine changes.
+if(UNIRT_NATIVE_TESTS AND UNIRT_PLUGIN_LLAMA_CPP AND UNIRT_BUILD_SHARED)
+    add_executable(
+        unirt-batching-stress-test
+        "${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/test_batching_stress.cpp")
+    target_include_directories(unirt-batching-stress-test PRIVATE ${COMMON_INCLUDE})
+    target_link_libraries(unirt-batching-stress-test PRIVATE unirt)
+    target_compile_definitions(unirt-batching-stress-test PRIVATE UNIRT_SHARED)
+    set_target_properties(unirt-batching-stress-test PROPERTIES
+        INSTALL_RPATH "$ORIGIN/src;$ORIGIN"
+        MACOSX_BUNDLE FALSE)
+endif()
+
 if(UNIRT_PYTHON_TESTS)
     set(UNIRT_PYTHON_TEST_EXECUTABLE "" CACHE FILEPATH "Python interpreter used for UniRT tests")
     if(NOT UNIRT_PYTHON_TEST_EXECUTABLE)

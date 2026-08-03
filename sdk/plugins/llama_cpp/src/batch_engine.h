@@ -148,9 +148,15 @@ class BatchEngine {
      * only wins if it beats that. Returns how many leading tokens of `wanted`
      * are now in this sequence's KV, or 0 when nothing was borrowed (in which
      * case the sequence's own cache is untouched).
+     *
+     * `mine` is this sequence's own transcript, rewritten here rather than by
+     * the caller: it is registered with the engine, a sibling may be reading
+     * it as a donor at this moment, and the caller is not yet inside a
+     * generation, which is the state that would have excluded it.
      */
     size_t borrow_prefix(
-        int32_t sequence, const std::vector<llama_token>& wanted, size_t already);
+        int32_t sequence, const std::vector<llama_token>& wanted, size_t already,
+        std::vector<llama_token>& mine);
 
     /**
      * Leading tokens of `sequence` whose cells another sequence may also be

@@ -3,7 +3,7 @@
 Versions are the tags on this repository; each one builds the native
 libraries for every platform and publishes the Python wheel.
 
-## Unreleased
+## 0.5.0
 
 ### Added
 
@@ -46,6 +46,16 @@ libraries for every platform and publishes the Python wheel.
   plus everyone else's next token. Three streams running, a 2000-token prompt
   arriving: worst gap between tokens 1650 ms -> 600 ms on CPU, 440 ms -> 145 ms
   on Metal, for 4-5% on the arriving request's own latency.
+
+### Fixed
+
+- A VLM opened with `n_seq_max` (which `--slots N` now passes) had its context
+  divided between sequences it can never have — media position state is per
+  handle, so the backend owns exactly one. It quietly left the caller a
+  fraction of the window it asked for.
+- Log records from several sequences interleaved into each other. The stream
+  was always safe to share; a record is four insertions, and they arrived
+  shuffled.
 
 ## 0.4.0
 
