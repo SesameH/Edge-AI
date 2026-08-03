@@ -530,7 +530,22 @@ typedef struct {
     int32_t n_threads_batch;  // prefill/batch threads
     int32_t n_batch;          // logical batch ceiling per decode submission
     int32_t n_ubatch;         // physical micro-batch ceiling
-    int32_t n_seq_max;        // max concurrent sequences (recurrent-model states)
+    /* How many handles opened on this model may decode at the same time.
+     * The llama.cpp backend reads it as permission to put those handles on
+     * one context and send their tokens through llama_decode in a single
+     * batch -- N sequences then cost one pass over the weights instead of N.
+     * Handles group by model path, device and context geometry; the
+     * (n_seq_max + 1)th gets a context of its own. 0 or 1 = no sharing, and
+     * a handle with draft_model_path never shares (speculative verification
+     * needs a batch it owns outright). Backends that do not batch ignore it.
+     *
+     * Two consequences worth knowing. The context is created with n_seq_max
+     * times the window asked for, so the memory is the same as N separate
+     * contexts and every sequence keeps its full n_ctx. And the sequences
+     * share one pool of KV cells, which changes the arithmetic slightly: the
+     * same request may come back a token different depending on what else was
+     * decoding beside it. Ask for one sequence to reproduce exactly. */
+    int32_t n_seq_max;
     int32_t n_gpu_layers;     // layers offloaded to the device; 0 = all on CPU
 
     // Prompt-formatting extras.

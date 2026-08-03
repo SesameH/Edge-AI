@@ -166,7 +166,8 @@ def test_server_main_accepts_hf_vlm_and_does_not_request_llm_stats(monkeypatch, 
 
     server.main()
 
-    assert loaded == [('acme/vision-GGUF', {'device_map': 'llama_cpp', 'n_ctx': 0})]
+    assert loaded == [
+        ('acme/vision-GGUF', {'device_map': 'llama_cpp', 'n_ctx': 0, 'n_seq_max': 1})]
     # main() hands over a registry now, not handles: the default model is
     # loaded eagerly (once -- a VLM keeps media position state per handle, so
     # it gets one slot) and any others load on demand.

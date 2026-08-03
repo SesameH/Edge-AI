@@ -3,6 +3,37 @@
 Versions are the tags on this repository; each one builds the native
 libraries for every platform and publishes the Python wheel.
 
+## Unreleased
+
+### Added
+
+- **Continuous batching** on the llama.cpp backend. `--slots N` now puts the N
+  handles on one context and decodes them in a single batch instead of running
+  N contexts side by side. Eight clients, four slots, 64 tokens each:
+
+  | | throughput | slowest request |
+  |---|---|---|
+  | 135M Q8_0, CPU | 85 → 597 tok/s | 6.00 → 0.86 s |
+  | 135M Q8_0, Metal | 180 → 224 tok/s | 2.84 → 2.28 s |
+  | 1.7B Q4_K_M, CPU | 8.2 → 75.7 tok/s | 62.2 → 6.8 s |
+  | 1.7B Q4_K_M, Metal | 39.9 → 79.7 tok/s | 12.8 → 6.4 s |
+
+  Part of the CPU figure is a defect removed rather than a win earned: separate
+  contexts each built their own thread pool, so four slots ran four pools on
+  eight cores. Splitting the threads by hand got separate contexts to 281 tok/s
+  on the 135M; the batch still doubles that.
+
+  Two things to know. Slots now share a pool of KV cells, so the same request
+  can come back a token different depending on what else was decoding beside it
+  -- the usual bargain for batched serving, and `--slots 1` still reproduces
+  exactly. And saved KV sessions are now per sequence
+  (`llama_state_seq_save_file`), so a session file written by 0.4.0 will not
+  load.
+
+  Available directly as `n_seq_max` on `unirt_ModelConfig` / `from_pretrained`.
+  A handle with a draft model keeps a context to itself: speculative
+  verification reads several positions of a batch it has to own.
+
 ## 0.4.0
 
 ### Fixed — read this one if you use Gemma, Llama or Mistral

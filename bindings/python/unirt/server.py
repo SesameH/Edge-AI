@@ -483,6 +483,14 @@ def load_slots(spec: ModelSpec) -> list:
     def open_one():
         return AutoModelForCausalLM.from_pretrained(
             spec.source, device_map=spec.backend, n_ctx=spec.n_ctx,
+            # How many of these handles may decode together. The llama.cpp
+            # backend reads it as permission to put them on one context and
+            # send their tokens through in a single batch, which is where the
+            # throughput of a slot pool actually comes from -- decoding four
+            # sequences separately costs four passes over the weights and
+            # batched it costs one. Backends that do not batch ignore it and
+            # keep a context each, exactly as before.
+            n_seq_max=spec.slots,
             **({'draft_model': spec.draft} if spec.draft else {}),
         )
 
@@ -1840,7 +1848,10 @@ def main(argv: list[str] | None = None) -> None:
         default=1,
         help='how many requests may decode at the same time. Each slot is a '
              'separate KV cache over the same weights (the plugin shares '
-             'those), so the cost is one context per slot, not one model. '
+             'those), so the cost is one cache per slot, not one model. On '
+             'the llama.cpp backend the slots also decode in one batch, which '
+             'is where the throughput comes from -- and it means a reply can '
+             'differ by a token depending on what else was in flight. '
              'Default 1, which is the old behaviour: a second request waits '
              'for the first to finish',
     )

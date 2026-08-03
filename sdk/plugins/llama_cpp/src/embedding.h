@@ -8,7 +8,7 @@
 
 #include <llama.h>
 
-#include "llm.h"  // ModelPtr / ContextPtr deleters
+#include "llama_ptr.h"
 #include "plugin/embedding_backend.h"
 
 namespace unirt::llama_plugin {

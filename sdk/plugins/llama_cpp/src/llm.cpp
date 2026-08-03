@@ -76,9 +76,8 @@ class LogprobReporter {
 
     /** Emit the sampled token and its top alternatives. False = caller stopped us. */
     bool report(
-        llama_context* context, llama_token sampled, unirt_logprob_callback callback,
+        const float* logits, llama_token sampled, unirt_logprob_callback callback,
         void* user_data) {
-        const float* logits = llama_get_logits_ith(context, -1);
         const int32_t vocab_size = llama_vocab_n_tokens(vocab_);
         if (!logits || vocab_size <= 0) return true;
 
@@ -171,10 +170,14 @@ void SamplerDeleter::operator()(llama_sampler* sampler) const noexcept {
     if (sampler) llama_sampler_free(sampler);
 }
 
+LlamaCppLlm::~LlamaCppLlm() { clear_model(); }
+
 void LlamaCppLlm::clear_model() noexcept {
-    context_.reset();
-    gguf_model_.reset();
+    if (engine_ && sequence_ != BatchEngine::kNoSequence) engine_->release(sequence_);
+    sequence_ = BatchEngine::kNoSequence;
+    engine_.reset();
     vocab_ = nullptr;
+    last_logits_ = nullptr;
     devices_.clear();
     history_.clear();
     template_override_.clear();
@@ -363,17 +366,11 @@ int32_t LlamaCppLlm::create(const unirt_LlmCreateInput* input) {
     }
 
     llama_context_params context_params = llama_context_default_params();
-    context_params.n_ctx = input->config.n_ctx > 0
-                               ? static_cast<uint32_t>(input->config.n_ctx)
-                               : 0;
     if (input->config.n_batch > 0) {
         context_params.n_batch = static_cast<uint32_t>(input->config.n_batch);
     }
     if (input->config.n_ubatch > 0) {
         context_params.n_ubatch = static_cast<uint32_t>(input->config.n_ubatch);
-    }
-    if (input->config.n_seq_max > 0) {
-        context_params.n_seq_max = static_cast<uint32_t>(input->config.n_seq_max);
     }
     if (input->config.n_threads > 0) context_params.n_threads = input->config.n_threads;
     if (input->config.n_threads_batch > 0) {
@@ -385,8 +382,77 @@ int32_t LlamaCppLlm::create(const unirt_LlmCreateInput* input) {
         context_params.op_offload = false;
     }
 
-    ContextPtr context(llama_init_from_model(model.get(), context_params));
-    if (!context && (!input->device_id || !input->device_id[0]) &&
+    // How many handles may share one context and decode together. The draft
+    // model is the one thing that rules batching out: verification reads
+    // several positions of a batch this handle owns outright, which a shared
+    // engine cannot promise. Such a handle gets a context to itself -- the
+    // arrangement every handle had before batching existed.
+    int32_t capacity = input->config.n_seq_max > 0 ? input->config.n_seq_max : 1;
+    const bool wants_draft = input->draft_model_path && input->draft_model_path[0];
+    if (wants_draft && capacity > 1) {
+        UNIRT_LOG_INFO(
+            "llama_cpp: n_seq_max={} ignored for a handle with a draft model; speculative "
+            "decoding and batching cannot share a context",
+            capacity);
+        capacity = 1;
+    }
+    // Each sequence must end up with the window the caller asked for, and
+    // llama.cpp splits n_ctx between them. Resolve "0 = whatever the model was
+    // trained for" here so the multiplication has something to work with.
+    int32_t per_sequence = input->config.n_ctx > 0
+                               ? input->config.n_ctx
+                               : static_cast<int32_t>(llama_model_n_ctx_train(model.get()));
+    if (per_sequence <= 0) per_sequence = 4096;
+
+    auto make_context = [&](int32_t seats) -> ContextPtr {
+        llama_context_params params = context_params;
+        params.n_seq_max            = static_cast<uint32_t>(seats);
+        // One shared pool of KV cells rather than a fixed partition per
+        // sequence. llama.cpp defaults the other way and its header suggests
+        // splitting when the sequences do not share a prefix, but measured
+        // here a split cache gives batching back everything it wins: four
+        // sequences batched cost the same as four decoded separately (0.99x),
+        // and unified they cost 1.25x less. The pool is sized for every
+        // sequence at its full window, so sharing the cells cannot make one
+        // conversation evict another's -- each handle still caps itself at
+        // context_size().
+        // One shared pool of KV cells rather than a fixed partition per
+        // sequence, but only once there is something to share. llama.cpp
+        // defaults the other way and its header suggests splitting when the
+        // sequences do not share a prefix; measured here a split cache gives
+        // most of batching back. Four sequences on CPU: 3.95x batched with a
+        // split cache, 7.80x with a unified one. On Metal a split cache wins
+        // nothing at all (0.99x against 1.27x).
+        //
+        // The cost is that a sequence's arithmetic now depends on what else
+        // is in the pool -- the same request run alone and run in a batch can
+        // part company on a near-tie, a token or two apart in the middle of a
+        // sentence. That is the standard bargain for batched serving, it is
+        // opt-in through n_seq_max, and a caller who needs the same tokens
+        // every time asks for one sequence and gets a pool to itself.
+        params.kv_unified = seats > 1;
+        params.n_ctx                = static_cast<uint32_t>(per_sequence) *
+                       static_cast<uint32_t>(seats);
+        return ContextPtr(llama_init_from_model(model.get(), params));
+    };
+
+    // Handles group by everything that has to be identical for one context to
+    // serve them all. n_threads is in there because it is a property of the
+    // context, and two callers asking for different thread counts should not
+    // silently get one of them.
+    auto engine_key = [&](const std::string& device) {
+        return device + '\x1f' + std::to_string(model_params.n_gpu_layers) + '\x1f' +
+               std::to_string(per_sequence) + '\x1f' + std::to_string(capacity) + '\x1f' +
+               std::to_string(context_params.n_batch) + '\x1f' +
+               std::to_string(context_params.n_ubatch) + '\x1f' +
+               std::to_string(context_params.n_threads) + '\x1f' +
+               std::to_string(context_params.n_threads_batch) + '\x1f' + input->model_path;
+    };
+
+    int32_t      sequence = BatchEngine::kNoSequence;
+    SharedEngine engine = acquire_engine(
+        engine_key(device_key), capacity, per_sequence, make_context, model, sequence);
+    if (!engine && (!input->device_id || !input->device_id[0]) &&
         model_params.n_gpu_layers != 0) {
         // A compiled GPU backend may be enumerated but unavailable at runtime
         // (notably Metal in headless macOS sessions). Preserve the useful
@@ -404,36 +470,43 @@ int32_t LlamaCppLlm::create(const unirt_LlmCreateInput* input) {
         context_params.offload_kqv = false;
         context_params.op_offload = false;
         model = acquire_model(input->model_path, selected_device_name, model_params);
-        if (model) context.reset(llama_init_from_model(model.get(), context_params));
+        if (model) {
+            engine = acquire_engine(
+                engine_key(selected_device_name), capacity, per_sequence, make_context, model,
+                sequence);
+        }
     }
-    if (!context) {
+    if (!engine) {
         UNIRT_LOG_ERROR("llama_cpp: failed to allocate inference context");
         return UNIRT_ERROR_COMMON_MODEL_LOAD;
     }
 
-    const int32_t actual_context = static_cast<int32_t>(llama_n_ctx(context.get()));
-    if (actual_context <= 0 || llama_n_batch(context.get()) == 0) {
+    if (engine->context_size() <= 0 || engine->batch_size() <= 0) {
         UNIRT_LOG_ERROR("llama_cpp: backend returned an invalid context configuration");
+        engine->release(sequence);
         return UNIRT_ERROR_COMMON_MODEL_LOAD;
     }
 
     clear_model();
-    gguf_model_ = std::move(model);
-    context_ = std::move(context);
-    vocab_ = llama_model_get_vocab(gguf_model_.get());
+    engine_ = std::move(engine);
+    sequence_ = sequence;
+    vocab_ = llama_model_get_vocab(engine_->model().get());
     devices_ = std::move(selected_devices);
     template_override_ = std::move(requested_template);
     device_name_ = std::move(selected_device_name);
-    context_size_ = actual_context;
-    shift_supported_ = llama_memory_can_shift(llama_get_memory(context_.get())) &&
-                       !llama_model_is_recurrent(gguf_model_.get());
+    context_size_ = engine_->context_size();
+    {
+        auto access = engine_->access();
+        shift_supported_ = llama_memory_can_shift(access.memory()) &&
+                           !llama_model_is_recurrent(engine_->model().get());
+    }
 
     char description[256] = {};
-    llama_model_desc(gguf_model_.get(), description, sizeof(description));
+    llama_model_desc(engine_->model().get(), description, sizeof(description));
     UNIRT_LOG_INFO(
-        "llama_cpp: loaded {} [{}], context={}, batch={}, device={}", input->model_path,
-        description[0] ? description : "GGUF", context_size_, llama_n_batch(context_.get()),
-        device_name_);
+        "llama_cpp: loaded {} [{}], context={}, batch={}, sequence={}/{}, device={}",
+        input->model_path, description[0] ? description : "GGUF", context_size_,
+        engine_->batch_size(), sequence_, engine_->capacity(), device_name_);
 
     if (input->draft_model_path && input->draft_model_path[0]) {
         // The draft gets the target's context size: it has to hold the same
@@ -457,20 +530,28 @@ int32_t LlamaCppLlm::create(const unirt_LlmCreateInput* input) {
 
 int32_t LlamaCppLlm::reset() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!context_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
-    llama_memory_clear(llama_get_memory(context_.get()), true);
+    if (!engine_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
+    auto access = engine_->access();
+    // This sequence only. The context may be holding three other conversations
+    // that have nothing to do with this handle being reset.
+    llama_memory_seq_rm(access.memory(), sequence_, -1, -1);
     history_.clear();
-    llama_perf_context_reset(context_.get());
+    last_logits_ = nullptr;
+    llama_perf_context_reset(access.context());
     return UNIRT_SUCCESS;
 }
 
 int32_t LlamaCppLlm::save_kv_cache(
     const unirt_KvCacheSaveInput* input, unirt_KvCacheSaveOutput*) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!context_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
+    if (!engine_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
     if (!input || !input->path || !input->path[0]) return UNIRT_ERROR_COMMON_INVALID_INPUT;
-    if (!llama_state_save_file(
-            context_.get(), input->path, history_.data(), history_.size())) {
+    auto access = engine_->access();
+    // Per sequence, not the whole context: what the caller means by "this
+    // session" is this handle's conversation, and the context behind it may be
+    // shared with three others.
+    if (!llama_state_seq_save_file(
+            access.context(), input->path, sequence_, history_.data(), history_.size())) {
         UNIRT_LOG_ERROR("llama_cpp: failed to save session {}", input->path);
         return UNIRT_ERROR_COMMON_UNKNOWN;
     }
@@ -480,13 +561,15 @@ int32_t LlamaCppLlm::save_kv_cache(
 int32_t LlamaCppLlm::load_kv_cache(
     const unirt_KvCacheLoadInput* input, unirt_KvCacheLoadOutput*) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!context_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
+    if (!engine_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
     if (!input || !input->path || !input->path[0]) return UNIRT_ERROR_COMMON_INVALID_INPUT;
 
     std::vector<llama_token> loaded(static_cast<size_t>(context_size_));
     size_t                   count = 0;
-    if (!llama_state_load_file(
-            context_.get(), input->path, loaded.data(), loaded.size(), &count)) {
+    auto                     access = engine_->access();
+    last_logits_ = nullptr;
+    if (!llama_state_seq_load_file(
+            access.context(), input->path, sequence_, loaded.data(), loaded.size(), &count)) {
         UNIRT_LOG_ERROR("llama_cpp: failed to load session {}", input->path);
         return UNIRT_ERROR_COMMON_MODEL_INVALID;
     }
@@ -503,7 +586,7 @@ int32_t LlamaCppLlm::apply_chat_template(
     const unirt_LlmApplyChatTemplateInput* input,
     unirt_LlmApplyChatTemplateOutput* output) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!gguf_model_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
+    if (!engine_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
     if (!input || !output || input->message_count < 0 ||
         (input->message_count > 0 && !input->messages)) {
         return UNIRT_ERROR_COMMON_INVALID_INPUT;
@@ -530,7 +613,7 @@ int32_t LlamaCppLlm::apply_chat_template(
         static_cast<size_t>(std::numeric_limits<int32_t>::max()));
 
     const char* tmpl = template_override_.empty()
-                           ? llama_model_chat_template(gguf_model_.get(), nullptr)
+                           ? llama_model_chat_template(engine_->model().get(), nullptr)
                            : template_override_.c_str();
     std::vector<char> buffer(estimated_size);
     int32_t length = llama_chat_apply_template(
@@ -600,9 +683,11 @@ int32_t LlamaCppLlm::evict_for_space(int32_t incoming) {
     n_evict                = std::min(n_evict, cached - head);
     if (n_evict <= 0) return 0;
 
-    auto* memory = llama_get_memory(context_.get());
-    llama_memory_seq_rm(memory, 0, head, head + n_evict);
-    llama_memory_seq_add(memory, 0, head + n_evict, cached, -n_evict);
+    {
+        auto access = engine_->access();
+        llama_memory_seq_rm(access.memory(), sequence_, head, head + n_evict);
+        llama_memory_seq_add(access.memory(), sequence_, head + n_evict, cached, -n_evict);
+    }
     history_.erase(history_.begin() + head, history_.begin() + head + n_evict);
     UNIRT_LOG_INFO(
         "llama_cpp: context shift evicted {} tokens (head {}, cached {} -> {})", n_evict, head,
@@ -612,34 +697,47 @@ int32_t LlamaCppLlm::evict_for_space(int32_t incoming) {
 
 int32_t LlamaCppLlm::decode(const llama_token* tokens, int32_t count) {
     if (count <= 0) return UNIRT_SUCCESS;
-    const int32_t batch_size = static_cast<int32_t>(llama_n_batch(context_.get()));
-    for (int32_t offset = 0; offset < count; offset += batch_size) {
-        const int32_t chunk_size = std::min(batch_size, count - offset);
-        auto* writable = const_cast<llama_token*>(tokens + offset);
-        int32_t result = llama_decode(
-            context_.get(), llama_batch_get_one(writable, chunk_size));
-        // rc==1 means the batch found no KV slot; shift the window and retry
-        // instead of failing, as long as eviction keeps making progress.
-        while (result == 1 && evict_for_space(chunk_size) > 0) {
-            result = llama_decode(
-                context_.get(), llama_batch_get_one(writable, chunk_size));
+    last_logits_ = nullptr;
+    // A prompt goes in one chunk per round, so a long prefill on one sequence
+    // would hold the batch for as many rounds as it takes -- but a chunk that
+    // fills the batch outright leaves no room for the other sequences' single
+    // decode tokens, and they would wait the whole prefill out. Leaving a
+    // margin lets them ride along with it.
+    const int32_t batch_size = engine_->batch_size();
+    const int32_t chunk_limit =
+        engine_->exclusive() ? batch_size : std::max(1, batch_size - engine_->capacity());
+    for (int32_t offset = 0; offset < count; offset += chunk_limit) {
+        const int32_t chunk_size = std::min(chunk_limit, count - offset);
+        const llama_pos position = static_cast<llama_pos>(history_.size());
+        DecodeStatus status = engine_->decode(
+            sequence_, tokens + offset, chunk_size, position, &last_logits_);
+        // "No KV slot" means this sequence is full; shift its window and retry
+        // instead of failing, as long as eviction keeps making progress. A
+        // rolled-back round is not a failure at all -- resubmit unchanged.
+        while (status == DecodeStatus::retry ||
+               (status == DecodeStatus::no_kv_slot && evict_for_space(chunk_size) > 0)) {
+            status = engine_->decode(
+                sequence_, tokens + offset, chunk_size,
+                static_cast<llama_pos>(history_.size()), &last_logits_);
         }
-        if (result == 0) {
+        if (status == DecodeStatus::ok) {
             // history_ mirrors the KV contents at all times so eviction and
             // prefix reuse can reason about positions from it alone.
             history_.insert(history_.end(), tokens + offset, tokens + offset + chunk_size);
             continue;
         }
-        UNIRT_LOG_ERROR("llama_cpp: decode failed with code {}", result);
-        if (result == 1) return UNIRT_ERROR_LLM_TOKENIZATION_CONTEXT_LENGTH;
-        if (result == 2) return UNIRT_ERROR_COMMON_CANCELLED;
+        UNIRT_LOG_ERROR(
+            "llama_cpp: decode failed with code {}", static_cast<int32_t>(status));
+        if (status == DecodeStatus::no_kv_slot) {
+            return UNIRT_ERROR_LLM_TOKENIZATION_CONTEXT_LENGTH;
+        }
+        if (status == DecodeStatus::aborted) return UNIRT_ERROR_COMMON_CANCELLED;
         return UNIRT_ERROR_LLM_GENERATION_FAILED;
     }
     return UNIRT_SUCCESS;
 }
 
-llama_token LlamaCppLlm::pick(llama_sampler* sampler, int32_t index) const {
-    const float* logits = llama_get_logits_ith(context_.get(), index);
+llama_token LlamaCppLlm::pick(llama_sampler* sampler, const float* logits) const {
     if (!logits) return LLAMA_TOKEN_NULL;
     const int32_t n_vocab = llama_vocab_n_tokens(vocab_);
 
@@ -659,6 +757,12 @@ int32_t LlamaCppLlm::speculate(
     llama_sampler* sampler, int32_t budget, std::vector<llama_token>& accepted, bool& spoiled) {
     spoiled = false;
     accepted.clear();
+    // Only ever reached on an engine of capacity one (create() forces that
+    // whenever a draft model is attached), so the context and its output
+    // buffer belong to this handle alone and reading several positions of the
+    // verification batch back out of it needs no round.
+    llama_context* context = engine_->unshared_context();
+    if (!context) return UNIRT_ERROR_LLM_GENERATION_FAILED;
 
     const int32_t proposal_count = std::min(budget - 1, draft_tokens_);
     std::vector<llama_token> proposals;
@@ -669,7 +773,7 @@ int32_t LlamaCppLlm::speculate(
     // The token the target would have produced anyway, from the logits it
     // already has. Sampled without accepting: if it disagrees with the first
     // proposal, everything after it is discarded and only this one is kept.
-    const llama_token first = pick(sampler, -1);
+    const llama_token first = pick(sampler, last_logits_);
     if (first == LLAMA_TOKEN_NULL) return UNIRT_ERROR_LLM_GENERATION_FAILED;
     accepted.push_back(first);
     // Accept as we go, not at the end: the next position is picked with the
@@ -697,11 +801,11 @@ int32_t LlamaCppLlm::speculate(
         batch.token[index]    = proposals[static_cast<size_t>(index)];
         batch.pos[index]      = static_cast<llama_pos>(history_.size()) + index;
         batch.n_seq_id[index] = 1;
-        batch.seq_id[index][0] = 0;
+        batch.seq_id[index][0] = sequence_;
         batch.logits[index]   = 1;
     }
     batch.n_tokens = batch_count;
-    const int32_t decoded = llama_decode(context_.get(), batch);
+    const int32_t decoded = llama_decode(context, batch);
     llama_batch_free(batch);
     if (decoded != 0) {
         // The KV may hold part of the batch; llama.cpp restores it on a
@@ -718,7 +822,7 @@ int32_t LlamaCppLlm::speculate(
     int32_t matched = 1;
     llama_token target_next = LLAMA_TOKEN_NULL;
     while (matched < batch_count) {
-        target_next = pick(sampler, matched - 1);
+        target_next = pick(sampler, llama_get_logits_ith(context, matched - 1));
         if (target_next == LLAMA_TOKEN_NULL) return UNIRT_ERROR_LLM_GENERATION_FAILED;
         if (target_next != proposals[static_cast<size_t>(matched)]) break;
         accepted.push_back(target_next);
@@ -729,7 +833,7 @@ int32_t LlamaCppLlm::speculate(
     if (matched == batch_count) {
         // Every proposal survived, so the last position's logits are a free
         // extra token: the target evaluated it in the same pass.
-        target_next = pick(sampler, batch_count - 1);
+        target_next = pick(sampler, llama_get_logits_ith(context, batch_count - 1));
         if (target_next == LLAMA_TOKEN_NULL) return UNIRT_ERROR_LLM_GENERATION_FAILED;
     }
 
@@ -738,9 +842,9 @@ int32_t LlamaCppLlm::speculate(
     // divergent token in the right position.
     const size_t keep = history_.size() - static_cast<size_t>(batch_count - matched);
     if (keep < history_.size()) {
-        auto* memory = llama_get_memory(context_.get());
-        if (!llama_memory_seq_rm(memory, 0, static_cast<llama_pos>(keep), -1)) {
-            llama_memory_clear(memory, true);
+        auto* memory = llama_get_memory(context);
+        if (!llama_memory_seq_rm(memory, sequence_, static_cast<llama_pos>(keep), -1)) {
+            llama_memory_seq_rm(memory, sequence_, -1, -1);
             history_.clear();
             spoiled = true;
             return UNIRT_SUCCESS;
@@ -871,7 +975,7 @@ SamplerPtr LlamaCppLlm::make_sampler(
 int32_t LlamaCppLlm::generate(
     const unirt_LlmGenerateInput* input, unirt_LlmGenerateOutput* output) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!context_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
+    if (!engine_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
     if (!input || !output) return UNIRT_ERROR_COMMON_INVALID_INPUT;
     *output = {};
 
@@ -919,7 +1023,7 @@ int32_t LlamaCppLlm::generate(
     // cache alone and lets the prefix-reuse pass below decide what survives.
     if (requested_past > 0 && static_cast<size_t>(requested_past) < history_.size()) {
         if (!llama_memory_seq_rm(
-                llama_get_memory(context_.get()), 0, requested_past, -1)) {
+                engine_->access().memory(), sequence_, requested_past, -1)) {
             UNIRT_LOG_ERROR("llama_cpp: backend cannot trim KV cache to n_past={}", requested_past);
             return UNIRT_ERROR_COMMON_NOT_SUPPORTED;
         }
@@ -953,11 +1057,13 @@ int32_t LlamaCppLlm::generate(
     // Anything cached beyond the shared prefix is stale and gets dropped.
     const size_t shared = reusable_prefix(prompt);
     if (shared < history_.size()) {
-        auto* memory = llama_get_memory(context_.get());
+        auto access = engine_->access();
+        last_logits_ = nullptr;
         if (shared == 0) {
-            llama_memory_clear(memory, true);
-        } else if (!llama_memory_seq_rm(memory, 0, static_cast<llama_pos>(shared), -1)) {
-            llama_memory_clear(memory, true);
+            llama_memory_seq_rm(access.memory(), sequence_, -1, -1);
+        } else if (!llama_memory_seq_rm(
+                       access.memory(), sequence_, static_cast<llama_pos>(shared), -1)) {
+            llama_memory_seq_rm(access.memory(), sequence_, -1, -1);
             history_.clear();
         }
         history_.resize(std::min(history_.size(), shared));
@@ -993,6 +1099,14 @@ int32_t LlamaCppLlm::generate(
             llama_sampler_accept(sampler.get(), prompt[i]);
         }
     }
+
+    // From here to the end of the call this sequence is one the engine should
+    // hold a round open for. Nothing above this point submits anything.
+    struct Membership {
+        BatchEngine& engine;
+        explicit Membership(BatchEngine& e) : engine(e) { engine.join(); }
+        ~Membership() { engine.leave(); }
+    } membership(*engine_);
 
     const int64_t start_time = monotonic_us();
     int32_t result = decode(fresh_tokens, fresh_count);
@@ -1043,11 +1157,16 @@ int32_t LlamaCppLlm::generate(
             already_decoded = history_.size() - before;
         }
         if (step.empty()) {
-            const llama_token token = llama_sampler_sample(sampler.get(), context_.get(), -1);
+            // pick() rather than llama_sampler_sample(): the scores come from
+            // the engine's own copy of this sequence's row, which a batch-mate's
+            // round cannot have overwritten, and accepting is done here so the
+            // chain advances exactly once per kept token.
+            const llama_token token = pick(sampler.get(), last_logits_);
             if (token == LLAMA_TOKEN_NULL) {
                 result = UNIRT_ERROR_LLM_GENERATION_FAILED;
                 break;
             }
+            llama_sampler_accept(sampler.get(), token);
             step.push_back(token);
             already_decoded = 0;
         }
@@ -1071,7 +1190,7 @@ int32_t LlamaCppLlm::generate(
             // produced this token. Decoding it overwrites them with the next
             // step's. (Only ever reached without speculation -- see above.)
             if (reporter && !reporter->report(
-                                context_.get(), token, input->on_logprob, input->user_data)) {
+                                last_logits_, token, input->on_logprob, input->user_data)) {
                 stream_state.discard_unemitted();
                 stop_reason = "user";
                 done = true;
@@ -1146,7 +1265,7 @@ int32_t LlamaCppLlm::generate(
 
 int32_t LlamaCppLlm::get_model_info(unirt_LlmModelInfo* output) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!gguf_model_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
+    if (!engine_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
     if (!output) return UNIRT_ERROR_COMMON_INVALID_INPUT;
     output->vocab_size = llama_vocab_n_tokens(vocab_);
     const llama_token bos = llama_vocab_bos(vocab_);
@@ -1157,12 +1276,15 @@ int32_t LlamaCppLlm::get_model_info(unirt_LlmModelInfo* output) {
 
 int32_t LlamaCppLlm::get_runtime_stats(unirt_LlmRuntimeStats* output) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!gguf_model_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
+    if (!engine_) return UNIRT_ERROR_COMMON_NOT_INITIALIZED;
     if (!output) return UNIRT_ERROR_COMMON_INVALID_INPUT;
-    output->model_bytes = static_cast<int64_t>(llama_model_size(gguf_model_.get()));
-    output->kv_cache_bytes = context_
-                                 ? static_cast<int64_t>(llama_state_get_size(context_.get()))
-                                 : -1;
+    output->model_bytes = static_cast<int64_t>(llama_model_size(engine_->model().get()));
+    // This sequence's share, not the pool's: with four handles on one context
+    // the pool figure would be the same number four times over and would look
+    // like four times the memory.
+    auto access = engine_->access();
+    output->kv_cache_bytes =
+        static_cast<int64_t>(llama_state_seq_get_size(access.context(), sequence_));
     output->device_peak_bytes = -1;
     output->device_name = device_name_.c_str();
     return UNIRT_SUCCESS;

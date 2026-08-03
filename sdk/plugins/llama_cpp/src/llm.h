@@ -10,29 +10,12 @@
 
 #include <llama.h>
 
+#include "batch_engine.h"
+#include "llama_ptr.h"
 #include "plugin/llm_backend.h"
 #include "weight_cache.h"
 
 namespace unirt::llama_plugin {
-
-/** Sole ownership of a llama_model. Still what the VLM and embedding backends
- *  use: only the text backend has a reason to share weights so far, since only
- *  it gets opened several times over for a pool of decoding slots. */
-struct ModelDeleter {
-    void operator()(llama_model* model) const noexcept;
-};
-
-struct ContextDeleter {
-    void operator()(llama_context* context) const noexcept;
-};
-
-struct SamplerDeleter {
-    void operator()(llama_sampler* sampler) const noexcept;
-};
-
-using ModelPtr   = std::unique_ptr<llama_model, ModelDeleter>;
-using ContextPtr = std::unique_ptr<llama_context, ContextDeleter>;
-using SamplerPtr = std::unique_ptr<llama_sampler, SamplerDeleter>;
 
 /**
  * The small model whose guesses the real one checks.
@@ -76,14 +59,17 @@ class DraftModel {
 
 /**
  * UniRT's text-generation contract implemented only through llama.cpp's
- * public API. An instance owns one context, one sequence, and its KV state;
- * the weights behind it are shared with any other handle on the same file.
- * Calls on the same handle are serialized because llama_context is mutable.
+ * public API. An instance owns one sequence of a BatchEngine and the KV state
+ * behind it; the context and the weights are shared with any other handle
+ * opened on the same file with the same geometry, so N handles decode in one
+ * batch over one copy of the model. Calls on the same handle are serialized
+ * because the sequence's transcript is mutable; calls on *different* handles
+ * run concurrently and meet only inside the engine.
  */
 class LlamaCppLlm final : public LlmBackend {
    public:
     LlamaCppLlm() = default;
-    ~LlamaCppLlm() override = default;
+    ~LlamaCppLlm() override;
 
     LlamaCppLlm(const LlamaCppLlm&)            = delete;
     LlamaCppLlm& operator=(const LlamaCppLlm&) = delete;
@@ -103,6 +89,9 @@ class LlamaCppLlm final : public LlmBackend {
     int32_t get_runtime_stats(unirt_LlmRuntimeStats* output) override;
 
    private:
+    // Put `count` tokens into this sequence's KV, in batch-sized chunks and
+    // batched with whatever other handles are decoding. Leaves last_logits_
+    // pointing at the model's scores for the final token.
     int32_t decode(const llama_token* tokens, int32_t count);
 
     // One verification round: propose with the draft, check the proposals
@@ -115,12 +104,13 @@ class LlamaCppLlm final : public LlmBackend {
         llama_sampler* sampler, int32_t budget, std::vector<llama_token>& accepted,
         bool& spoiled);
 
-    // Run the chain over the logits at `index` without accepting the result.
+    // Run the chain over one row of model scores without accepting the result.
     // llama_sampler_sample() accepts internally, which is right for a token
     // that is definitely being kept and wrong for a proposal that may be
     // rejected -- the rejected token would still have entered the penalty and
-    // grammar state.
-    llama_token pick(llama_sampler* sampler, int32_t index) const;
+    // grammar state. It also insists on reading the context's own output
+    // buffer, which a shared engine may already have decoded over.
+    llama_token pick(llama_sampler* sampler, const float* logits) const;
     int32_t tokenize(const char* text, bool add_special, std::vector<llama_token>& output) const;
     std::string token_piece(llama_token token) const;
     SamplerPtr make_sampler(const unirt_SamplerConfig* config, int32_t& error, bool& has_grammar) const;
@@ -135,12 +125,14 @@ class LlamaCppLlm final : public LlmBackend {
     size_t reusable_prefix(const std::vector<llama_token>& wanted) const;
 
     mutable std::mutex mutex_;
-    // Shared with every other handle that opened the same file on the same
-    // device: llama_model is read-only, and it is context_ below that holds
-    // this handle's own mutable KV state. See weight_cache.h.
-    SharedModel       gguf_model_;
-    ContextPtr        context_;
-    const llama_vocab* vocab_ = nullptr;
+    // The context and the weights are both shared; what belongs to this handle
+    // is sequence_, an independent region of the KV cache. See batch_engine.h.
+    SharedEngine       engine_;
+    int32_t            sequence_ = BatchEngine::kNoSequence;
+    const llama_vocab* vocab_    = nullptr;
+    // Scores for the last token this sequence decoded, from the engine. Only
+    // valid until the next submission on this handle.
+    const float* last_logits_ = nullptr;
 
     // llama_model_params::devices is an array terminated by nullptr. Keep it
     // alive for the model lifetime even though current llama.cpp consumes it

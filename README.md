@@ -304,10 +304,29 @@ the model (llama.cpp, 138 MB Q8_0: +204 MB for the first handle, +16 MB for
 each one after; MLX, 269 MB bf16: 287 MB of device memory for one slot, 329 MB
 for four).
 
-What that buys is not aggregate throughput — one decode already saturates the
-device, so four concurrent requests finish in about the time one batch would.
-It is head-of-line blocking. A short request arriving behind a long one, on an
-M1 with a 135M model:
+On the llama.cpp backend the slots also **decode in one batch**. A decode step
+is a pass over the model's weights, and the arithmetic it does per token is
+trivial next to the reading — so a second and third sequence in the same pass
+are close to free, which is why prefill runs an order of magnitude faster than
+decode on the same model. Sharing one context is what lets a slot pool collect
+that. Eight clients, four slots, 64 tokens each:
+
+| | throughput | slowest request |
+|---|---|---|
+| 135M Q8_0, CPU | 85 → **597 tok/s** | 6.00 → **0.86 s** |
+| 135M Q8_0, Metal | 180 → **224 tok/s** | 2.84 → **2.28 s** |
+| 1.7B Q4_K_M, CPU | 8.2 → **75.7 tok/s** | 62.2 → **6.8 s** |
+| 1.7B Q4_K_M, Metal | 39.9 → **79.7 tok/s** | 12.8 → **6.4 s** |
+
+Part of the CPU figure is a defect the batch removed rather than a win it
+earned: separate contexts each build their own thread pool, so four slots ran
+four full pools on eight cores and spent the difference in contention. Split
+the threads by hand and separate contexts reach 281 tok/s on the 135M — the
+batch still doubles that, to 599. Nobody splits them by hand.
+
+Batching also does not remove head-of-line blocking, it just stops the fix
+from costing throughput. A short request arriving behind a long one, on an M1
+with a 135M model:
 
 | | long request (400 tok) | 3 short requests (8 tok) behind it |
 |---|---|---|
@@ -318,6 +337,13 @@ The default is 1, which is the old behaviour: a slot is real memory, and on a
 7B with a long context four of them is several GB. Requests are routed to the
 slot that already holds their conversation, so a continuing chat prefills only
 its new turn instead of landing on a stranger's cache.
+
+One thing changes when slots share a context: the sequences share the pool of
+KV cells, and the cells a neighbour occupies are masked out of the attention
+but still part of the tensor being reduced. The same request can therefore
+come back a token different depending on what else was in flight — the usual
+bargain for batched serving. `--slots 1` gives a context to itself and
+reproduces exactly.
 
 ### Speculative decoding
 
